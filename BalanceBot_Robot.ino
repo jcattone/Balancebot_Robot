@@ -34,6 +34,9 @@
 #include "EspNowRemote.h"
 #include "EspNowRemote_Events.h"
 using namespace EspNowRemote;
+
+#include "Types.h"
+
 RmtBase* remote = EspNowRemote::MakeController();
 joystick_state_t g_joystick_state = {};
 
@@ -62,41 +65,10 @@ Adafruit_SSD1306 display = Adafruit_SSD1306(128, 32, &Wire);
 #define SCREEN_ADDRESS 0x3C   ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 char textBuffer[SCREEN_HEIGHT_ROWS][SCREEN_CHAR_WIDTH];
 
-// With each update, the orientation will be captured in gOrientation
-struct OrientationAngles {
-  float pitch;
-  float roll;
-  float yaw;
-} gOrientation;
-
-// To support multiple config modes...
-enum eConfigMode {
-  ePwmMin,
-  ePwmMax,
-  ePwmFreq,
-  ePidKp,
-  ePidKi,
-  ePidKd,
-  eHBridgeIdle,
-  eFusionKp,
-  eFusionKi,
-  eMaxConfigMode
-};
 eConfigMode gCurrentConfigMode = eFusionKp;
 
-enum eHBridgeIdleMode {
-  eBraking,
-  eCoasting,
-  eIdleUnknown
-};
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
 
-enum RelativeDirection {
-  eStopped,
-  eForward,
-  eBackward,
-  eDirectionUnknown
-};
 
 #define MOTOR_PIN_1 18
 #define MOTOR_PIN_2 19
@@ -113,11 +85,16 @@ float gPidKi = 0.5f;
 float gPidKd = 0.0f;
 
 void OnDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t sendStatus) {
+  // TODO: Plumb this back into the remote
 }
+
+// All received ESP-NOW traffic arrives here, and is funnelled into the remote.
 void IRAM_ATTR OnDataRecv(const esp_now_recv_info_t* esp_now_info, const uint8_t* data, int data_len) {
+  Serial.printf("ESPNOW, OnDataRecv => %d bytes\n", data_len);
   remote->HandleDataReceived(esp_now_info, data, data_len);
 }
 
+// When the remote controller wants to raise a message, it will be published here.
 unsigned long last_hid_input_timestamp = 0;
 bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len) {
   switch (msg_type) {
@@ -125,10 +102,13 @@ bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len) {
       // Loopback status from the local remote instance... not from the controller.
       memcpy(textBuffer[1], data, data_len);
       textBuffer[1][data_len] = 0;
+      Serial.println((const char*) data);
       break;
+
     case MSGTYPE_RMT_JOYSTICK:
       memcpy(&g_joystick_state, data, data_len);
       last_hid_input_timestamp = micros();
+      break;
   }
   return true;
 }
@@ -170,7 +150,6 @@ void setup() {
 
   esp_now_register_send_cb(OnDataSent);
   esp_now_register_recv_cb(OnDataRecv);
-
   remote->Setup();
   remote->RegisterMsgHandler(OnControllerMessage);
   remote->Start();
