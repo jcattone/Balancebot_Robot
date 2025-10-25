@@ -37,11 +37,6 @@ using namespace EspNowRemote;
 RmtBase* remote = EspNowRemote::MakeController();
 joystick_state_t g_joystick_state = {};
 
-// #define ENABLE_SERVO 1
-// #include <ESP32Servo.h>
-// Servo myservo;
-// #define SERVO_PIN 32
-
 // Initialize the IMU filter weights:
 // Kp ~= trust accel data (gravity vector) to correct gyro drift
 //   High Kp = correct quickly, but linear acceleration (i.e., translation) can be misread as orientation change
@@ -368,7 +363,7 @@ void handleInput() {
   if (last_hid_input_timestamp > last_hid_message_processed) {
     last_hid_message_processed = last_hid_input_timestamp;
     if (g_joystick_state.count > 0) {
-      switch (g_joystick_state.joystickDirection) {
+      switch (g_joystick_state.joystick_direction) {
         case JOYSTICK_UP:
           joystickY = 4096;
           break;
@@ -383,7 +378,7 @@ void handleInput() {
           break;
       }
       // 'consume' the event
-      joystick_state.count = 0
+      g_joystick_state.count = 0;
     }
     // ; // last_hid_input_timestamp
   }
