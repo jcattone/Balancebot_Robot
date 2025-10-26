@@ -84,10 +84,12 @@ float gPidKp = 1.0f;
 float gPidKi = 0.5f;
 float gPidKd = 0.0f;
 
-void OnDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t sendStatus) {
-  // TODO: Plumb this back into the remote
+// esp_now_send_cb_t
+void OnDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t send_status) {
+  remote->HandleDataSent(tx_info, send_status);
 }
 
+// esp_now_recv_cb_t
 // All received ESP-NOW traffic arrives here, and is funnelled into the remote.
 void IRAM_ATTR OnDataRecv(const esp_now_recv_info_t* esp_now_info, const uint8_t* data, int data_len) {
   Serial.printf("ESPNOW, OnDataRecv => %d bytes\n", data_len);
