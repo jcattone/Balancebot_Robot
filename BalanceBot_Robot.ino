@@ -49,7 +49,7 @@ joystick_state_t g_joystick_state = {};
 //   High Ki = aggressively remove bias, but can become sluggish.  In practice, overshoot is observed.
 //   Low Ki = may allow bias to persistently affect the output
 // In practice, I'm seeing eyeball-reasonable results with Kp=10..25, and Ki=0..5
-Adafruit_Mahony filter(20, 4);  // ...(float prop_gain, float int_gain) // Kp, Ki
+Adafruit_Mahony filter(10, 3);  // ...(float prop_gain, float int_gain) // Kp, Ki
 
 // The IMU instance itself
 Adafruit_MPU6050 mpu;
@@ -63,7 +63,7 @@ Adafruit_SSD1306 display = Adafruit_SSD1306(128, 32, &Wire);
 #define SCREEN_HEIGHT_ROWS 4  // 7+1 pixel font height
 #define OLED_RESET -1         // Reset pin # (or -1 if sharing Arduino reset pin)
 #define SCREEN_ADDRESS 0x3C   ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
-char textBuffer[SCREEN_HEIGHT_ROWS][SCREEN_CHAR_WIDTH];
+char textBuffer[SCREEN_HEIGHT_ROWS][SCREEN_CHAR_WIDTH + 1]; // the +1 is for a null terminator
 
 eConfigMode gCurrentConfigMode = eFusionKp;
 
@@ -86,13 +86,18 @@ float gPidKd = 0.0f;
 
 // esp_now_send_cb_t
 void OnDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t send_status) {
+#if SERIAL_DIAG
+  Serial.printf("OnDataSent, type=%d, len=%d\n", tx_info->data[3], tx_info->data_len);
+#endif
   remote->HandleDataSent(tx_info, send_status);
 }
 
 // esp_now_recv_cb_t
 // All received ESP-NOW traffic arrives here, and is funnelled into the remote.
 void IRAM_ATTR OnDataRecv(const esp_now_recv_info_t* esp_now_info, const uint8_t* data, int data_len) {
+#if SERIAL_DIAG
   Serial.printf("ESPNOW, OnDataRecv => %d bytes\n", data_len);
+#endif
   remote->HandleDataReceived(esp_now_info, data, data_len);
 }
 
@@ -104,7 +109,9 @@ bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len) {
       // Loopback status from the local remote instance... not from the controller.
       memcpy(textBuffer[1], data, data_len);
       textBuffer[1][data_len] = 0;
+//#if SERIAL_DIAG
       Serial.println((const char*) data);
+//#endif
       break;
 
     case MSGTYPE_RMT_JOYSTICK:
@@ -116,9 +123,8 @@ bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len) {
 }
 
 void setup() {
-  Serial.begin(38400);
+  Serial.begin(115200);
   // while (!Serial);
-  Serial.println("MPU6050 demo");
 
   // ESP-NOW control
   WiFi.persistent(false);
@@ -303,7 +309,9 @@ void updateMotors() {
 void initDisplay() {
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {  // Address 0x3C for 128x32
+#if SERIAL_DIAG
     Serial.println(F("SSD1306 allocation failed"));
+#endif
     for (;;)
       ;  // Don't proceed, loop forever
   }
@@ -320,7 +328,6 @@ void initImu() {
     while (1)
       yield();
   }
-  Serial.println("Found a MPU-6050 sensor");
 
   // Param: samples per second
   filter.begin(100);
@@ -449,40 +456,64 @@ void updateDisplay() {
 
   // Row 4: current config
   display.setCursor(0, 3 * 8);
+  
+  char detailString[SCREEN_CHAR_WIDTH + 1];
   switch (gCurrentConfigMode) {
     case eFusionKp:
-      display.printf("Kp=[%.1f] Ki=%.1f", filter.getKp(), filter.getKi());
+      sprintf(detailString, "Kp=[%.1f] Ki=%.1f", filter.getKp(), filter.getKi());
       break;
     case eFusionKi:
-      display.printf("Kp=%.1f Ki=[%.1f]", filter.getKp(), filter.getKi());
+      sprintf(detailString, "Kp=%.1f Ki=[%.1f]", filter.getKp(), filter.getKi());
       break;
     case ePwmMin:
-      display.printf("pwm=[%d]-%d (%d)", gPwmMinDuty, gPwmMaxDuty, gPwmCurrentDuty);
+      sprintf(detailString, "pwm=[%d]-%d (%d)", gPwmMinDuty, gPwmMaxDuty, gPwmCurrentDuty);
       break;
     case ePwmMax:
-      display.printf("pwm=%d-[%d] (%d)", gPwmMinDuty, gPwmMaxDuty, gPwmCurrentDuty);
+      sprintf(detailString, "pwm=%d-[%d] (%d)", gPwmMinDuty, gPwmMaxDuty, gPwmCurrentDuty);
       break;
     case ePwmFreq:
-      display.printf("pwmFreq=[%d] (%d)", gPwmFreq, gPwmCurrentDuty);
+      sprintf(detailString, "pwmFreq=[%d] (%d)", gPwmFreq, gPwmCurrentDuty);
       break;
     case eHBridgeIdle:
       if (gHBridgeIdleMode == eBraking)
-        display.printf("Idle=[B] /  C ");
+        sprintf(detailString, "Idle=[B] /  C ");
       else
-        display.printf("Idle= B  / [C]");
+        sprintf(detailString, "Idle= B  / [C]");
       break;
     case ePidKp:
-      display.printf("PID [%.2f] %.2f %.2f", gPidKp, gPidKi, gPidKd);
+      sprintf(detailString, "PID [%.2f] %.2f %.2f", gPidKp, gPidKi, gPidKd);
       break;
     case ePidKi:
-      display.printf("PID %.2f [%.2f] %.2f", gPidKp, gPidKi, gPidKd);
+      sprintf(detailString, "PID %.2f [%.2f] %.2f", gPidKp, gPidKi, gPidKd);
       break;
     case ePidKd:
-      display.printf("PID %.2f %.2f [%.2f]", gPidKp, gPidKi, gPidKd);
+      sprintf(detailString, "PID %.2f %.2f [%.2f]", gPidKp, gPidKi, gPidKd);
       break;
   }
-
+  strcpy(textBuffer[3], detailString);
   display.display();
+
+  // Send to the remote
+  bool sent = false;
+  static unsigned long last_sent_millis = 0;
+  
+  char* titleString = "Config"; // Placeholder for a possibly variable title in the future
+  static char lastTitleBuf[SCREEN_CHAR_WIDTH + 1] = {};
+  if(strcmp(titleString, lastTitleBuf) || now - last_sent_millis > 1000) {
+    remote->Send(MSGTYPE_CTL_TITLE, reinterpret_cast<const uint8_t*>(titleString), SEND_NULLTERMINATED);
+    strcpy(lastTitleBuf, titleString);
+    sent = true;
+  }
+
+  static char lastDetailBuf[SCREEN_CHAR_WIDTH + 1] = {};
+  if(strcmp(detailString, lastDetailBuf) || now - last_sent_millis > 1000) {
+    remote->Send(MSGTYPE_CTL_DETAIL, (uint8_t*) detailString, SEND_NULLTERMINATED);
+    strcpy(lastDetailBuf, detailString);
+    sent = true;
+  }
+
+  if(sent)
+    last_sent_millis = now;
 }
 
 void updateOrientation() {
