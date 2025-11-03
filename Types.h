@@ -10,6 +10,7 @@ struct OrientationAngles {
 } gOrientation;
 
 // To support multiple config modes...
+// TODO: Add the disply-only yaw/pitch/roll & diag for remote display, so that we can remove the SSD1306
 enum eConfigMode {
   ePwmMin,
   ePwmMax,
@@ -20,7 +21,8 @@ enum eConfigMode {
   eHBridgeIdle,
   eFusionKp,
   eFusionKi,
-  eMaxConfigMode
+  eIMUDisplay,
+  eMaxConfigMode,
 };
 
 

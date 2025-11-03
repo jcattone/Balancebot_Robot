@@ -49,14 +49,16 @@ joystick_state_t g_joystick_state = {};
 //   High Ki = aggressively remove bias, but can become sluggish.  In practice, overshoot is observed.
 //   Low Ki = may allow bias to persistently affect the output
 // In practice, I'm seeing eyeball-reasonable results with Kp=10..25, and Ki=0..5
-Adafruit_Mahony filter(10, 3);  // ...(float prop_gain, float int_gain) // Kp, Ki
+//   (10.0 & 3.0 seems fastish and low noise)
+//   (32/2 seems snappy)
+Adafruit_Mahony filter(35.0f, 0.4f);  // ...(float prop_gain, float int_gain) // Kp, Ki
 
 // The IMU instance itself
 Adafruit_MPU6050 mpu;
 
 // The display... Assumed to be on the default I2C pins
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 32, &Wire);
-
+bool gHasDisplay = false;
 #define SCREEN_WIDTH 128                                     // OLED display width, in pixels
 #define SCREEN_CHAR_WIDTH 21                                 // 5+1 pixel font width
 #define SCREEN_HEIGHT 32                                     // OLED display height, in pixels
@@ -169,6 +171,7 @@ void loop() {
   handleInput();
   updateOrientation();
   updateDisplay();
+  updateRemoteDisplay();
   updateMotors();
 }
 
@@ -308,18 +311,20 @@ void updateMotors() {
 
 void initDisplay() {
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
+  gHasDisplay = false;
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {  // Address 0x3C for 128x32
 #ifdef SERIAL_DIAG
-    Serial.println(F("SSD1306 allocation failed"));
+    Serial.println(F("SSD1306 not found"));
 #endif
-    for (;;)
-      ;  // Don't proceed, loop forever
+    return;
   }
+
   display.display();
   delay(20);
   display.setTextSize(1);
   display.setTextColor(WHITE);
   display.setRotation(0);
+  gHasDisplay = true;
 }
 
 void initImu() {
@@ -339,11 +344,11 @@ void initImu() {
 
 void handleInput() {
   static unsigned long lastUpdate = 0;
-  static bool isDebouncing = false;
-  unsigned int now = millis();
-  if (now - lastUpdate < 20)
-    return;
-  lastUpdate = now;
+  static bool suppressModeChange = false;
+  // unsigned int now = millis();
+  // if (now - lastUpdate < 20)
+  //   return;
+  // lastUpdate = now;
 
   static unsigned long last_hid_message_processed = 0;
   if (last_hid_message_processed == last_hid_input_timestamp)
@@ -352,33 +357,41 @@ void handleInput() {
 
   // Process joystick events if there's an unprocessed count.
   if (g_joystick_state.count > 0) {
+    // Extract the joystick state
     bool up = (g_joystick_state.joystick_direction & JOYSTICK_UP) != 0;
     bool down = (g_joystick_state.joystick_direction & JOYSTICK_DOWN) != 0;
     bool left = (g_joystick_state.joystick_direction & JOYSTICK_LEFT) != 0;
     bool right = (g_joystick_state.joystick_direction & JOYSTICK_RIGHT) != 0;
     int count = std::max((uint8_t)1, g_joystick_state.count);
 
-    // reset (consume) the count, so that it is not reprocessed
+    // reset (consume) the count, so that events are not reprocessed
     g_joystick_state.count = 0;
 
-    // Config mode
-    if (isDebouncing) {
+    // For ergonomics, config mode is single-step (one step per tap).
+    // Once changed, wait for the joystick to return to a
+    // vertically-neutral position before allowing another tap.
+    if (suppressModeChange) {
+      // If neither up nor down, we're vertically neurtal - we can
+      // start watching for another mode change.
       if (!(up || down))
-        isDebouncing = false;
+        suppressModeChange = false;
     } else {
+      // Roll the config mode, but then suppress additional mode
+      // changes to prevent rapidly scrolling through config options.
       if (up) {
         if (gCurrentConfigMode == 0)
           gCurrentConfigMode = (eConfigMode)(eMaxConfigMode);
         gCurrentConfigMode = (eConfigMode)(gCurrentConfigMode - 1);
-        isDebouncing = true;
+        suppressModeChange = true;
       } else if (down) {
         gCurrentConfigMode = (eConfigMode)(gCurrentConfigMode + 1);
         if (gCurrentConfigMode == eMaxConfigMode)
           gCurrentConfigMode = (eConfigMode)0;
-        isDebouncing = true;
+        suppressModeChange = true;
       }
     }
 
+    // Right/left apply a change to the current mode, scaled by the count when applicable.
     switch (gCurrentConfigMode) {
       case eFusionKp:
         if (right) filter.setKp(min(100.0, filter.getKp() + 0.1 * count));
@@ -398,9 +411,11 @@ void handleInput() {
         break;
       case ePwmFreq:
         {
-          float fact = pow(1.1, count);
-          if (right) gPwmFreq = min(40000, max(gPwmFreq + 1, (int)(gPwmFreq * fact)));
-          else if (left) gPwmFreq = max(10, min(gPwmFreq - 1, (int)(gPwmFreq / fact)));
+          for (int i = 0; i < count; ++i) {
+            if (right) gPwmFreq = min(40000, max(gPwmFreq + 1, (int)(gPwmFreq * 1.1f)));
+            else if (left) gPwmFreq = max(10, min(gPwmFreq - 1, (int)(gPwmFreq / 1.1f)));
+          }
+
           if (right || left) {
             analogWriteFrequency(MOTOR_PIN_1, gPwmFreq);
             analogWriteFrequency(MOTOR_PIN_2, gPwmFreq);
@@ -422,6 +437,9 @@ void handleInput() {
       case ePidKd:
         adjustPidK(&gPidKd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
+      case eIMUDisplay:
+      default:
+        break;
     }
   }
 }
@@ -433,6 +451,9 @@ void adjustPidK(float* f, float delta) {
 }
 
 void updateDisplay() {
+  if (!gHasDisplay)
+    return;
+
   static unsigned long lastUpdate = 0;
   unsigned int now = millis();
   if (now - lastUpdate < 10)
@@ -443,13 +464,22 @@ void updateDisplay() {
 
   // Rows 1-3: Orientation
   display.setCursor(0, 0);
-  display.printf("Roll:%.2f\nPitch:%.2f\nYaw:%.2f", gOrientation.roll, gOrientation.pitch, gOrientation.yaw);
+  display.printf("Roll:%.2f\nPitch:%.2f\nYaw:%.2f", gOrientation.roll, gOrientation.pitch, gOrientation.yaw);  
+  display.display();
+}
 
-  // Row 4: current config
-  display.setCursor(0, 3 * 8);
+void updateRemoteDisplay() {
+  static unsigned long lastUpdate = 0;
+  unsigned int now = millis();
+  if (now - lastUpdate < 100)
+    return;
+  lastUpdate = now;
 
   char detailString[SCREEN_CHAR_WIDTH + 1];
   switch (gCurrentConfigMode) {
+    case eIMUDisplay:
+      snprintf(detailString, sizeof(detailString), "IMU: R%+04.1f P%+04.1f", gOrientation.roll, gOrientation.pitch);
+      break;
     case eFusionKp:
       sprintf(detailString, "Kp=[%.1f] Ki=%.1f", filter.getKp(), filter.getKi());
       break;
@@ -481,8 +511,6 @@ void updateDisplay() {
       sprintf(detailString, "PID %.2f %.2f [%.2f]", gPidKp, gPidKi, gPidKd);
       break;
   }
-  strcpy(textBuffer[3], detailString);
-  display.display();
 
   // Send to the remote
   bool sent = false;
