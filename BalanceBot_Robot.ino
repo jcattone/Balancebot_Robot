@@ -57,13 +57,13 @@ Adafruit_MPU6050 mpu;
 // The display... Assumed to be on the default I2C pins
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 32, &Wire);
 
-#define SCREEN_WIDTH 128      // OLED display width, in pixels
-#define SCREEN_CHAR_WIDTH 21  // 5+1 pixel font width
-#define SCREEN_HEIGHT 32      // OLED display height, in pixels
-#define SCREEN_HEIGHT_ROWS 4  // 7+1 pixel font height
-#define OLED_RESET -1         // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3C   ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
-char textBuffer[SCREEN_HEIGHT_ROWS][SCREEN_CHAR_WIDTH + 1]; // the +1 is for a null terminator
+#define SCREEN_WIDTH 128                                     // OLED display width, in pixels
+#define SCREEN_CHAR_WIDTH 21                                 // 5+1 pixel font width
+#define SCREEN_HEIGHT 32                                     // OLED display height, in pixels
+#define SCREEN_HEIGHT_ROWS 4                                 // 7+1 pixel font height
+#define OLED_RESET -1                                        // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C                                  ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+char textBuffer[SCREEN_HEIGHT_ROWS][SCREEN_CHAR_WIDTH + 1];  // the +1 is for a null terminator
 
 eConfigMode gCurrentConfigMode = eFusionKp;
 
@@ -86,7 +86,7 @@ float gPidKd = 0.0f;
 
 // esp_now_send_cb_t
 void OnDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t send_status) {
-#if SERIAL_DIAG
+#ifdef SERIAL_DIAG
   Serial.printf("OnDataSent, type=%d, len=%d\n", tx_info->data[3], tx_info->data_len);
 #endif
   remote->HandleDataSent(tx_info, send_status);
@@ -95,7 +95,7 @@ void OnDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t send_s
 // esp_now_recv_cb_t
 // All received ESP-NOW traffic arrives here, and is funnelled into the remote.
 void IRAM_ATTR OnDataRecv(const esp_now_recv_info_t* esp_now_info, const uint8_t* data, int data_len) {
-#if SERIAL_DIAG
+#ifdef SERIAL_DIAG
   Serial.printf("ESPNOW, OnDataRecv => %d bytes\n", data_len);
 #endif
   remote->HandleDataReceived(esp_now_info, data, data_len);
@@ -109,9 +109,9 @@ bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len) {
       // Loopback status from the local remote instance... not from the controller.
       memcpy(textBuffer[1], data, data_len);
       textBuffer[1][data_len] = 0;
-//#if SERIAL_DIAG
-      Serial.println((const char*) data);
-//#endif
+      //#ifdef SERIAL_DIAG
+      Serial.println((const char*)data);
+      //#endif
       break;
 
     case MSGTYPE_RMT_JOYSTICK:
@@ -309,7 +309,7 @@ void updateMotors() {
 void initDisplay() {
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {  // Address 0x3C for 128x32
-#if SERIAL_DIAG
+#ifdef SERIAL_DIAG
     Serial.println(F("SSD1306 allocation failed"));
 #endif
     for (;;)
@@ -344,94 +344,85 @@ void handleInput() {
   if (now - lastUpdate < 20)
     return;
   lastUpdate = now;
-  int joystickY = 2048, joystickX = 2048;
 
-  // USE_ESPNOW
   static unsigned long last_hid_message_processed = 0;
-  if (last_hid_input_timestamp > last_hid_message_processed) {
-    last_hid_message_processed = last_hid_input_timestamp;
-    if (g_joystick_state.count > 0) {
-      switch (g_joystick_state.joystick_direction) {
-        case JOYSTICK_UP:
-          joystickY = 4096;
-          break;
-        case JOYSTICK_DOWN:
-          joystickY = 0;
-          break;
-        case JOYSTICK_RIGHT:
-          joystickX = 4096;
-          break;
-        case JOYSTICK_LEFT:
-          joystickX = 0;
-          break;
-      }
-      // 'consume' the event
-      g_joystick_state.count = 0;
-    }
-    // ; // last_hid_input_timestamp
-  }
+  if (last_hid_message_processed == last_hid_input_timestamp)
+    return;
+  last_hid_message_processed = last_hid_input_timestamp;
 
-  // Config mode
-  if (isDebouncing) {
-    if (joystickY > 1000 && joystickY < 3000)
-      isDebouncing = false;
-  } else {
-    if (joystickY < 100) {
-      if (gCurrentConfigMode == 0)
-        gCurrentConfigMode = (eConfigMode)(eMaxConfigMode);
-      gCurrentConfigMode = (eConfigMode)(gCurrentConfigMode - 1);
-      isDebouncing = true;
-    } else if (joystickY > 3900) {
-      gCurrentConfigMode = (eConfigMode)(gCurrentConfigMode + 1);
-      if (gCurrentConfigMode == eMaxConfigMode)
-        gCurrentConfigMode = (eConfigMode)0;
-      isDebouncing = true;
-    }
-  }
+  // Process joystick events if there's an unprocessed count.
+  if (g_joystick_state.count > 0) {
+    bool up = (g_joystick_state.joystick_direction & JOYSTICK_UP) != 0;
+    bool down = (g_joystick_state.joystick_direction & JOYSTICK_DOWN) != 0;
+    bool left = (g_joystick_state.joystick_direction & JOYSTICK_LEFT) != 0;
+    bool right = (g_joystick_state.joystick_direction & JOYSTICK_RIGHT) != 0;
+    int count = std::max((uint8_t)1, g_joystick_state.count);
 
-  // Actual config
-  bool up = joystickX > 3900;
-  bool down = joystickX < 100;
-  switch (gCurrentConfigMode) {
-    case eFusionKp:
-      if (up) filter.setKp(min(100.0, filter.getKp() + 0.1));
-      else if (down) filter.setKp(max(0.0, filter.getKp() - 0.1));
-      break;
-    case eFusionKi:
-      if (up) filter.setKi(min(100.0, filter.getKi() + 0.1));
-      else if (down) filter.setKi(max(0.0, filter.getKi() - 0.1));
-      break;
-    case ePwmMin:
-      if (up) gPwmMinDuty = min(gPwmMaxDuty, gPwmMinDuty + 1);
-      else if (down) gPwmMinDuty = max(0, gPwmMinDuty - 1);
-      break;
-    case ePwmMax:
-      if (up) gPwmMaxDuty = min(255, gPwmMaxDuty + 1);
-      else if (down) gPwmMaxDuty = max(gPwmMinDuty, gPwmMaxDuty - 1);
-      break;
-    case ePwmFreq:
-      if (up) gPwmFreq = min(40000, max(gPwmFreq + 1, (int)(gPwmFreq * 1.1)));
-      else if (down) gPwmFreq = max(10, min(gPwmFreq - 1, (int)(gPwmFreq / 1.1)));
-      if (up || down) {
-        analogWriteFrequency(MOTOR_PIN_1, gPwmFreq);
-        analogWriteFrequency(MOTOR_PIN_2, gPwmFreq);
+    // reset (consume) the count, so that it is not reprocessed
+    g_joystick_state.count = 0;
+
+    // Config mode
+    if (isDebouncing) {
+      if (!(up || down))
+        isDebouncing = false;
+    } else {
+      if (up) {
+        if (gCurrentConfigMode == 0)
+          gCurrentConfigMode = (eConfigMode)(eMaxConfigMode);
+        gCurrentConfigMode = (eConfigMode)(gCurrentConfigMode - 1);
+        isDebouncing = true;
+      } else if (down) {
+        gCurrentConfigMode = (eConfigMode)(gCurrentConfigMode + 1);
+        if (gCurrentConfigMode == eMaxConfigMode)
+          gCurrentConfigMode = (eConfigMode)0;
+        isDebouncing = true;
       }
-      break;
-    case eHBridgeIdle:
-      if (up)
-        gHBridgeIdleMode = eCoasting;
-      else if (down)
-        gHBridgeIdleMode = eBraking;
-      break;
-    case ePidKp:
-      adjustPidK(&gPidKp, up ? 0.01f : (down ? -0.01f : 0.0f));
-      break;
-    case ePidKi:
-      adjustPidK(&gPidKi, up ? 0.01f : (down ? -0.01f : 0.0f));
-      break;
-    case ePidKd:
-      adjustPidK(&gPidKd, up ? 0.01f : (down ? -0.01f : 0.0f));
-      break;
+    }
+
+    switch (gCurrentConfigMode) {
+      case eFusionKp:
+        if (right) filter.setKp(min(100.0, filter.getKp() + 0.1 * count));
+        else if (left) filter.setKp(max(0.0, filter.getKp() - 0.1 * count));
+        break;
+      case eFusionKi:
+        if (right) filter.setKi(min(100.0, filter.getKi() + 0.1 * count));
+        else if (left) filter.setKi(max(0.0, filter.getKi() - 0.1 * count));
+        break;
+      case ePwmMin:
+        if (right) gPwmMinDuty = min(gPwmMaxDuty, gPwmMinDuty + count);
+        else if (left) gPwmMinDuty = max(0, gPwmMinDuty - count);
+        break;
+      case ePwmMax:
+        if (right) gPwmMaxDuty = min(255, gPwmMaxDuty + count);
+        else if (left) gPwmMaxDuty = max(gPwmMinDuty, gPwmMaxDuty - count);
+        break;
+      case ePwmFreq:
+        {
+          float fact = pow(1.1, count);
+          if (right) gPwmFreq = min(40000, max(gPwmFreq + 1, (int)(gPwmFreq * fact)));
+          else if (left) gPwmFreq = max(10, min(gPwmFreq - 1, (int)(gPwmFreq / fact)));
+          if (right || left) {
+            analogWriteFrequency(MOTOR_PIN_1, gPwmFreq);
+            analogWriteFrequency(MOTOR_PIN_2, gPwmFreq);
+          }
+        }
+        break;
+      case eHBridgeIdle:
+        if (right)
+          gHBridgeIdleMode = eCoasting;
+        else if (left)
+          gHBridgeIdleMode = eBraking;
+        break;
+      case ePidKp:
+        adjustPidK(&gPidKp, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        break;
+      case ePidKi:
+        adjustPidK(&gPidKi, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        break;
+      case ePidKd:
+        adjustPidK(&gPidKd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        break;
+    }
   }
 }
 
@@ -456,7 +447,7 @@ void updateDisplay() {
 
   // Row 4: current config
   display.setCursor(0, 3 * 8);
-  
+
   char detailString[SCREEN_CHAR_WIDTH + 1];
   switch (gCurrentConfigMode) {
     case eFusionKp:
@@ -495,24 +486,24 @@ void updateDisplay() {
 
   // Send to the remote
   bool sent = false;
-  static unsigned long last_sent_millis = 0;
-  
-  char* titleString = "Config"; // Placeholder for a possibly variable title in the future
+  static unsigned long last_sent_millis = 0L;
+
+  const char* titleString = "Config";  // Placeholder for a possibly variable title in the future
   static char lastTitleBuf[SCREEN_CHAR_WIDTH + 1] = {};
-  if(strcmp(titleString, lastTitleBuf) || now - last_sent_millis > 1000) {
+  if (strcmp(titleString, lastTitleBuf) || now - last_sent_millis > 1000) {
     remote->Send(MSGTYPE_CTL_TITLE, reinterpret_cast<const uint8_t*>(titleString), SEND_NULLTERMINATED);
     strcpy(lastTitleBuf, titleString);
     sent = true;
   }
 
   static char lastDetailBuf[SCREEN_CHAR_WIDTH + 1] = {};
-  if(strcmp(detailString, lastDetailBuf) || now - last_sent_millis > 1000) {
-    remote->Send(MSGTYPE_CTL_DETAIL, (uint8_t*) detailString, SEND_NULLTERMINATED);
+  if (strcmp(detailString, lastDetailBuf) || now - last_sent_millis > 1000) {
+    remote->Send(MSGTYPE_CTL_DETAIL, (uint8_t*)detailString, SEND_NULLTERMINATED);
     strcpy(lastDetailBuf, detailString);
     sent = true;
   }
 
-  if(sent)
+  if (sent)
     last_sent_millis = now;
 }
 
