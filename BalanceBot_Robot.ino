@@ -13,9 +13,11 @@
 // The Adafruit library gives us basic MPU-6050 accel and gyro data
 #include <Adafruit_MPU6050.h>
 
+#ifdef HAS_DISPLAY
 // We'll use an SSD1306 128x32 display in lieu of serial output,
 // which can interfere with the I2C bus
 #include <Adafruit_SSD1306.h>
+#endif
 
 // AHRS algorithms produce a stablized estimation of bearing from a 6-axis (or 9-axis) IMU.
 // The Mahony algorithm is computationally inexpensive, and seems to provide sufficiently
@@ -56,8 +58,11 @@ Adafruit_Mahony filter(35.0f, 0.4f);  // ...(float prop_gain, float int_gain) //
 // The IMU instance itself
 Adafruit_MPU6050 mpu;
 
+#ifdef HAS_DISPLAY
 // The display... Assumed to be on the default I2C pins
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 32, &Wire);
+#endif
+
 bool gHasDisplay = false;
 #define SCREEN_WIDTH 128                                     // OLED display width, in pixels
 #define SCREEN_CHAR_WIDTH 21                                 // 5+1 pixel font width
@@ -69,22 +74,28 @@ char textBuffer[SCREEN_HEIGHT_ROWS][SCREEN_CHAR_WIDTH + 1];  // the +1 is for a 
 
 eConfigMode gCurrentConfigMode = eFusionKp;
 
-eHBridgeIdleMode gHBridgeIdleMode = eBraking;
+eHBridgeIdleMode gHBridgeIdleMode = eCoasting;
 
 
-#define MOTOR_PIN_1 18
-#define MOTOR_PIN_2 19
+#define MOTORA_PIN_1 25
+#define MOTORA_PIN_2 26
+#define MOTORB_PIN_1 32
+#define MOTORB_PIN_2 33
 
 
-int gPwmMinDuty = 20;
-int gPwmMaxDuty = 160;
+int gPwmMinDuty = 18;
+int gPwmMaxDuty = 160;  // ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
 int gPwmCurrentDuty = 0;
 int gPwmDutyMagnitude = 0;
-int gPwmFreq = 25;
+int gPwmFreq = 105;
+int gDeadZone = 0;
 
-float gPidKp = 1.0f;
-float gPidKi = 0.5f;
-float gPidKd = 0.0f;
+float gPidKp = 0.49f;
+float gPidKi = 0.0f;
+float gPidKd = 0.22f;
+
+float gMotorFilter = 1.0f;
+float gDIIRWeight = 0.40f;
 
 // esp_now_send_cb_t
 void OnDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t send_status) {
@@ -141,18 +152,26 @@ void setup() {
   }
 
   // TODO: initMotors()
-  pinMode(MOTOR_PIN_1, OUTPUT);
-  pinMode(MOTOR_PIN_2, OUTPUT);
+  pinMode(MOTORA_PIN_1, OUTPUT);
+  pinMode(MOTORA_PIN_2, OUTPUT);
+  pinMode(MOTORB_PIN_1, OUTPUT);
+  pinMode(MOTORB_PIN_2, OUTPUT);
 
-  analogWriteFrequency(MOTOR_PIN_1, gPwmFreq);
-  analogWriteFrequency(MOTOR_PIN_2, gPwmFreq);
+  analogWriteFrequency(MOTORA_PIN_1, gPwmFreq);
+  analogWriteFrequency(MOTORA_PIN_2, gPwmFreq);
+  analogWriteFrequency(MOTORB_PIN_1, gPwmFreq);
+  analogWriteFrequency(MOTORB_PIN_2, gPwmFreq);
   // Initializing the motor pins uniformly solves the 'jerk on startup' problem
   if (gHBridgeIdleMode == eBraking) {
-    analogWrite(MOTOR_PIN_1, 1);
-    analogWrite(MOTOR_PIN_2, 1);
+    analogWrite(MOTORA_PIN_1, 1);
+    analogWrite(MOTORA_PIN_2, 1);
+    analogWrite(MOTORB_PIN_1, 1);
+    analogWrite(MOTORB_PIN_2, 1);
   } else {
-    analogWrite(MOTOR_PIN_1, 0);
-    analogWrite(MOTOR_PIN_2, 0);
+    analogWrite(MOTORA_PIN_1, 0);
+    analogWrite(MOTORA_PIN_2, 0);
+    analogWrite(MOTORB_PIN_1, 0);
+    analogWrite(MOTORB_PIN_2, 0);
   }
 
   initDisplay();
@@ -176,18 +195,38 @@ void loop() {
 }
 
 void updateMotors() {
-  static unsigned long lastUpdate = 0;
+  static int startupPwmAttenuation = 0;
 
-  static int lastPos = 90;
+  static unsigned long lastUpdate = 0;
   unsigned long now = millis();
   if (now - lastUpdate < 20)
     return;
   lastUpdate = now;
 
+
   // PID per-update inputs
+  // TODO: trim for the balance point
+  // TODO: setpoint offset for travel
   int desiredAngle = 0.0f;
-  // [-90, -90] generally speaking (technically, can go to +/- 180)
-  float currentAngle = gOrientation.roll;
+  // [-90, -90] generally speaking (pitch decreases after 90 for some reason?)
+  float currentAngle = gOrientation.pitch;
+
+  // Record the duration over which an unsafe pitch has been continuously exceeded.
+  // Upon recovering from an unsafe pitch, reset some state to perform a soft-start.
+  static unsigned long unsafeEntered = 0;
+  static bool unsafe = false;
+  bool wasUnsafe = unsafe;
+  unsafe = currentAngle < -50 || currentAngle > 50;
+  if (unsafe && !wasUnsafe)
+    unsafeEntered = now;
+  else if (!unsafe && wasUnsafe) {
+    // Reset after recovery
+    startupPwmAttenuation = 0;
+    gPwmCurrentDuty = 0;
+    gPwmDutyMagnitude = 0;
+  }
+
+  unsigned long unsafeDuration = unsafe ? now - unsafeEntered : 0;
 
   // Calculate dT in seconds (the actual time unit is arbitrary, as long as we're consistent)
   static unsigned long lastSampleTime = 0;
@@ -208,13 +247,18 @@ void updateMotors() {
   // This is sometimes known as 'covariance' adjustment,
   // compensating for the acceleration's impact on the
   // apparent gravity vector.
+  // The applied acceleration would need to be estimated from the
+  // change in speed over time... we could use a circular buffer
+  // with a configurable lookback?
+  // We could also selectively suppress the IMU accel data if under
+  // acceleration, shifting emphasis to the integrated gyro for
+  // short-term noisy action.  The danger is that balancing is
+  // inherently oscillatory, and so frequently under accel.
   float currentAngleAdjusted = currentAngle;
+
   // TODO: TBD whether this error has the correct sign - we may
   // need to flip this to change the direction of the feedback.
   float errorAngle = currentAngleAdjusted - desiredAngle;
-
-  static int lastErrorSign = 0;
-  int currentErrorSign = std::signbit(errorAngle);
 
   // P: [-90, 90] typical
   float P = errorAngle;
@@ -225,8 +269,11 @@ void updateMotors() {
   // Clear the integral when we cross the setpoint (don't carry windup across a stable threshold).
   // Note that this doesn't account for inertia - we might wind up crossing rapidly - this suggests
   // a use for the derivative term.
+  static int lastErrorSign = 0;
+  int currentErrorSign = std::signbit(errorAngle);
   if (currentErrorSign != lastErrorSign)
     errorIntegral = 0;
+  lastErrorSign = currentErrorSign;
 
   // Only accumulate error when we aren't saturated
   if (std::abs(gPwmCurrentDuty) < gPwmMaxDuty) {
@@ -245,10 +292,9 @@ void updateMotors() {
   // at additional complexity.
   static float lastErrorAngle = 0.0f;
   static float errorDeltaPerSecondIIR = 0.0f;
-  static float errorDeltaPerSecondIIRWeight = 0.60f;
   float errorDeltaPerSecond = (errorAngle - lastErrorAngle) / deltaTSec;
   // IIR; weight the accumulator heavily, and the new value lightly.
-  errorDeltaPerSecondIIR = errorDeltaPerSecondIIRWeight * errorDeltaPerSecondIIR + (1.0f - errorDeltaPerSecondIIRWeight) * errorDeltaPerSecond;
+  errorDeltaPerSecondIIR = gDIIRWeight * errorDeltaPerSecond * (1.0f - gDIIRWeight) * errorDeltaPerSecondIIR;
   //Serial.printf("eA:%.1f,lea:%.1f,dT:%.3f,edps:%.1f,edpsIIR:%.1f\n", errorAngle, lastErrorAngle, deltaTSec, errorDeltaPerSecond, errorDeltaPerSecondIIR);
   lastErrorAngle = errorAngle;
   float D = errorDeltaPerSecondIIR;
@@ -265,18 +311,35 @@ void updateMotors() {
   // Serial.printf("cA:%.1f,errA:%.1f,P:%.1f,I:%.1f,D:%.1f,PID:%.1f\n", currentAngle, errorAngle, P, I, D, PIDOutput);
 
   // Attenuate the PWM output on startup to prevent noisy output
-  static int startupPwmAttenuation = 0;
   int constrainedAccel = constrain(rawAccel, -startupPwmAttenuation, startupPwmAttenuation);
   if (startupPwmAttenuation < 255)
     ++startupPwmAttenuation;
 
   // Adjust the speed by the desired relative acceleration, constraining the duty cycle to the PWM limits.
   // Note that this can be negative, to indicate a reversed direction.
+  // TODO: Permit brief excusions beyond gPwmMaxDuty (up to 255) for recovery, but trigger 'unsafe' if operating beyond saturation for more than briefly?)
   gPwmCurrentDuty = constrain(gPwmCurrentDuty + constrainedAccel, -gPwmMaxDuty, gPwmMaxDuty);
+
+  // Optional filter
+  if (gMotorFilter <= 0.999f) {
+    static float motorIIR = 0;
+    motorIIR = (gMotorFilter * gPwmCurrentDuty) + (1.0 - gMotorFilter) * motorIIR;
+    gPwmCurrentDuty = (int)(motorIIR + 0.5);
+  }
+
+  if (gPwmCurrentDuty < gDeadZone && gPwmCurrentDuty > -gDeadZone)
+    gPwmCurrentDuty = 0;
 
   // Now compress the output to eliminate the dead zone.
   // TODO: more nuanced mapping (e.g., near-zero dead-zone + fast-ramp)
-  gPwmDutyMagnitude = map(std::abs(gPwmCurrentDuty), 0, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
+  gPwmDutyMagnitude = map(std::abs(gPwmCurrentDuty), gDeadZone, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
+
+  // Safety limiter - more than 500ms continuously at an unsafe angle will shut down the motor
+  // TODO: delay reactivation after recovery & reset the soft start
+  if (unsafeDuration > 500) {
+    gPwmCurrentDuty = 0;
+    gPwmDutyMagnitude = 0;
+  }
 
   // Depending upon direction, the DRV8833 needs different pins driven.
   bool m1Driven;
@@ -305,13 +368,16 @@ void updateMotors() {
   }
 
   // Update the motor PWM.
-  analogWrite(MOTOR_PIN_1, m1);
-  analogWrite(MOTOR_PIN_2, m2);
+  analogWrite(MOTORA_PIN_1, m1);
+  analogWrite(MOTORA_PIN_2, m2);
+  analogWrite(MOTORB_PIN_1, m1);
+  analogWrite(MOTORB_PIN_2, m2);
 }
 
 void initDisplay() {
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   gHasDisplay = false;
+#ifdef HAS_DISPLAY
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {  // Address 0x3C for 128x32
 #ifdef SERIAL_DIAG
     Serial.println(F("SSD1306 not found"));
@@ -324,6 +390,8 @@ void initDisplay() {
   display.setTextSize(1);
   display.setTextColor(WHITE);
   display.setRotation(0);
+#endif
+
   gHasDisplay = true;
 }
 
@@ -417,10 +485,30 @@ void handleInput() {
           }
 
           if (right || left) {
-            analogWriteFrequency(MOTOR_PIN_1, gPwmFreq);
-            analogWriteFrequency(MOTOR_PIN_2, gPwmFreq);
+            analogWriteFrequency(MOTORA_PIN_1, gPwmFreq);
+            analogWriteFrequency(MOTORA_PIN_2, gPwmFreq);
+            analogWriteFrequency(MOTORB_PIN_1, gPwmFreq);
+            analogWriteFrequency(MOTORB_PIN_2, gPwmFreq);
           }
         }
+        break;
+      case eMotorSmoothing:
+        if (right)
+          gMotorFilter = min(1.0f, gMotorFilter + 0.001f * count);
+        else if (left)
+          gMotorFilter = max(0.0f, gMotorFilter - 0.001f * count);
+        break;
+      case eDIIRWeight:
+        if (right)
+          gDIIRWeight = min(1.0f, gDIIRWeight + 0.01f * count);
+        else if (left)
+          gDIIRWeight = max(0.0f, gDIIRWeight - 0.01f * count);
+        break;
+      case eDeadzone:
+        if (right)
+          gDeadZone = min(255, gDeadZone + count);
+        else if (left)
+          gDeadZone = max(0, gDeadZone - count);
         break;
       case eHBridgeIdle:
         if (right)
@@ -460,17 +548,31 @@ void updateDisplay() {
     return;
   lastUpdate = now;
 
+#ifdef HAS_DISPLAY
   display.clearDisplay();
 
   // Rows 1-3: Orientation
   display.setCursor(0, 0);
-  display.printf("Roll:%.2f\nPitch:%.2f\nYaw:%.2f", gOrientation.roll, gOrientation.pitch, gOrientation.yaw);  
+  display.printf("Roll:%.2f\nPitch:%.2f\nYaw:%.2f", gOrientation.roll, gOrientation.pitch, gOrientation.yaw);
   display.display();
+#endif
 }
 
+// TODO: ABort immediately if not connected, and always update when reconnected
 void updateRemoteDisplay() {
-  static unsigned long lastUpdate = 0;
   unsigned int now = millis();
+
+  static int frameCount = 0;
+  static int lastFrameRate = 0;
+  static unsigned long lastFrameStart = 0;
+  ++frameCount;
+  if (now - lastFrameStart >= 1000) {
+    lastFrameRate = frameCount;
+    frameCount = 0;
+    lastFrameStart = now;
+  }
+
+  static unsigned long lastUpdate = 0;
   if (now - lastUpdate < 100)
     return;
   lastUpdate = now;
@@ -495,6 +597,15 @@ void updateRemoteDisplay() {
     case ePwmFreq:
       sprintf(detailString, "pwmFreq=[%d] (%d)", gPwmFreq, gPwmCurrentDuty);
       break;
+    case eMotorSmoothing:
+      sprintf(detailString, "mSmooth: %.3f", gMotorFilter);
+      break;
+    case eDIIRWeight:
+      sprintf(detailString, "D_IIR: %.2f", gDIIRWeight);
+      break;
+    case eDeadzone:
+      sprintf(detailString, "mDead: %d", gDeadZone);
+      break;
     case eHBridgeIdle:
       if (gHBridgeIdleMode == eBraking)
         sprintf(detailString, "Idle=[B] /  C ");
@@ -516,8 +627,9 @@ void updateRemoteDisplay() {
   bool sent = false;
   static unsigned long last_sent_millis = 0L;
 
-  const char* titleString = "Config";  // Placeholder for a possibly variable title in the future
+  char titleString[SCREEN_CHAR_WIDTH] = { 0 };
   static char lastTitleBuf[SCREEN_CHAR_WIDTH + 1] = {};
+  snprintf(titleString, sizeof(titleString), "P%+04.1f (%dfps)", gOrientation.pitch, lastFrameRate);
   if (strcmp(titleString, lastTitleBuf) || now - last_sent_millis > 1000) {
     remote->Send(MSGTYPE_CTL_TITLE, reinterpret_cast<const uint8_t*>(titleString), SEND_NULLTERMINATED);
     strcpy(lastTitleBuf, titleString);
@@ -538,26 +650,35 @@ void updateRemoteDisplay() {
 void updateOrientation() {
   static unsigned long lastUpdate = 0;
   unsigned int now = millis();
+  // Target 100 Hz, coordinated with the rate we provided to filter.begin()
   if (now - lastUpdate < 10)
     return;
   lastUpdate = now;
 
   sensors_event_t a, g, temp;
+
+  // Get the accel (gravity vector) in m/s
+  // Get the gyro (turn rate) in radians-per-second
   mpu.getEvent(&a, &g, &temp);
 
   // Update in degrees-per-second and gravities
   filter.update(
     // From radians-per-second to degrees-per-second
-    g.gyro.x * 180.0 / M_PI,
-    g.gyro.y * 180.0 / M_PI,
-    g.gyro.z * 180.0 / M_PI,
+    g.gyro.x * 180.0f / M_PI,
+    g.gyro.y * 180.0f / M_PI,
+    g.gyro.z * 180.0f / M_PI,
     // From m/s to gravities
-    a.acceleration.x / 9.81,
-    a.acceleration.y / 9.81,
-    a.acceleration.z / 9.81,
-    0.0,
-    0.0,
-    0.0);
+    a.acceleration.x / 9.81f,
+    a.acceleration.y / 9.81f,
+    a.acceleration.z / 9.81f,
+    0.0f,
+    0.0f,
+    0.0f);
+  // TODO: add dT, or ensure that updates are closely tied to whatever update
+  // rate we provided to the filter.begin (currently, 100 updates / sec)?
+  // Calc using micros(), not millis(), for accuracy
+  // dT is measures in seconds (i.e., nominally .01 @ 100Hz)
+  // TODO: Send loops/sec to the remote
 
   gOrientation.roll = filter.getRoll();
   gOrientation.pitch = filter.getPitch();
