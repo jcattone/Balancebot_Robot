@@ -10,6 +10,8 @@
 //     Motor 1: Pins 18, 19
 //   10k pull-up resistors on both I2C lines
 
+#include <cmath>  // sin()
+
 // The Adafruit library gives us basic MPU-6050 accel and gyro data
 #include <Adafruit_MPU6050.h>
 
@@ -38,9 +40,16 @@
 using namespace EspNowRemote;
 
 #include "Types.h"
+#include "BalancePID.h"
 
 RmtBase* remote = EspNowRemote::MakeController();
 joystick_state_t g_joystick_state = {};
+
+const int g_sample_freq = 200;
+const int g_update_freq = 200;
+
+const int g_sample_period = 1000 / g_sample_freq;
+const int g_update_period = 1000 / g_update_freq;
 
 // Initialize the IMU filter weights:
 // Kp ~= trust accel data (gravity vector) to correct gyro drift
@@ -53,7 +62,7 @@ joystick_state_t g_joystick_state = {};
 // In practice, I'm seeing eyeball-reasonable results with Kp=10..25, and Ki=0..5
 //   (10.0 & 3.0 seems fastish and low noise)
 //   (32/2 seems snappy)
-Adafruit_Mahony filter(35.0f, 0.4f);  // ...(float prop_gain, float int_gain) // Kp, Ki
+Adafruit_Mahony filter(16.6f, 0.3f);  // ...(float prop_gain, float int_gain) // Kp, Ki
 
 // The IMU instance itself
 Adafruit_MPU6050 mpu;
@@ -72,9 +81,8 @@ bool gHasDisplay = false;
 #define SCREEN_ADDRESS 0x3C                                  ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 char textBuffer[SCREEN_HEIGHT_ROWS][SCREEN_CHAR_WIDTH + 1];  // the +1 is for a null terminator
 
-eConfigMode gCurrentConfigMode = eFusionKp;
+eConfigMode gCurrentConfigMode = eDefaultConfigMode;
 
-eHBridgeIdleMode gHBridgeIdleMode = eCoasting;
 
 
 #define MOTORA_PIN_1 25
@@ -82,20 +90,35 @@ eHBridgeIdleMode gHBridgeIdleMode = eCoasting;
 #define MOTORB_PIN_1 32
 #define MOTORB_PIN_2 33
 
+#define LED_PIN 2
 
-int gPwmMinDuty = 18;
+// TODO: Motor gain/trim (i.e., adjust for differences in left/right speed or stiction-break)
+// TODO: Motor ratio as proxy for steering
+// TODO: Remote-control steering
+// TODO: Correction from bounce/bump is often excessive (insufficient compensation, or maybe needs to go above maxpwm briefly?)
+// TODO: Wheel encoders for feedback / auto-calibrate trim
+
+eHBridgeIdleMode gHBridgeIdleMode = eBraking;
+int gPwmMinDuty = 22;
 int gPwmMaxDuty = 160;  // ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
 int gPwmCurrentDuty = 0;
 int gPwmDutyMagnitude = 0;
-int gPwmFreq = 105;
-int gDeadZone = 0;
+int gPwmFreq = 2 * g_update_freq;
+int gDeadZone = 1;
+float gLastSetpoint = 0.0f;
+float gPitchTrim = 0.8f;
 
-float gPidKp = 0.49f;
-float gPidKi = 0.0f;
-float gPidKd = 0.22f;
+float gPitchPidKp = 0.17f; // Or 0.24,0,0.06
+float gPitchPidKi = 0.0f;
+float gPitchPidKd = 0.07f;
 
-float gMotorFilter = 1.0f;
-float gDIIRWeight = 0.40f;
+float gMotorFilter = 0.684f;
+float gDIIRWeight = 0.16f;
+
+float gVelocityDIIRWeight = 0.80f;
+float gVelocityPidKp = 0.14f;
+float gVelocityPidKi = 0.0f;
+float gVelocityPidKd = 0.0f;
 
 // esp_now_send_cb_t
 void OnDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t send_status) {
@@ -151,6 +174,9 @@ void setup() {
     return;
   }
 
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
   // TODO: initMotors()
   pinMode(MOTORA_PIN_1, OUTPUT);
   pinMode(MOTORA_PIN_2, OUTPUT);
@@ -194,52 +220,42 @@ void loop() {
   updateMotors();
 }
 
-void updateMotors() {
-  static int startupPwmAttenuation = 0;
+// TODO: position or velocity pid control via angle setpoint guidance
+// Velocity: based on the rate the inactive bot would tip & fall, a desired
+// speed can be achieved by leaning into the desired direction.  As the
+// target speed is achieved, the lean must be reversed.  If aiming for
+// station-holding, seek a pwm rate of 0.  Infer speed from the current
+// pwm duty cycle.
+// Position: this requires integration of motor output over time, or
+// even the use of a position encoder.
 
-  static unsigned long lastUpdate = 0;
-  unsigned long now = millis();
-  if (now - lastUpdate < 20)
-    return;
-  lastUpdate = now;
-
+// Given a desired angle, guide acceleration.
+bool pitchPidUpdate(float desiredAngle, float deltaTSec, float& accelOut) {
+  // TODO: Map accel based on angle, knowing that small angles need
+  // very little correction, but high angles need super-linear adjustment.
+  // e.g., the accel could be proportional to cos(errorAngle),
+  // or (perhaps more accurately), cos(angle) where vertical is 0
 
   // PID per-update inputs
   // TODO: trim for the balance point
   // TODO: setpoint offset for travel
-  int desiredAngle = 0.0f;
   // [-90, -90] generally speaking (pitch decreases after 90 for some reason?)
   float currentAngle = gOrientation.pitch;
 
-  // Record the duration over which an unsafe pitch has been continuously exceeded.
-  // Upon recovering from an unsafe pitch, reset some state to perform a soft-start.
-  static unsigned long unsafeEntered = 0;
-  static bool unsafe = false;
-  bool wasUnsafe = unsafe;
-  unsafe = currentAngle < -50 || currentAngle > 50;
-  if (unsafe && !wasUnsafe)
-    unsafeEntered = now;
-  else if (!unsafe && wasUnsafe) {
-    // Reset after recovery
-    startupPwmAttenuation = 0;
-    gPwmCurrentDuty = 0;
-    gPwmDutyMagnitude = 0;
+  // --------------------------------------
+  // Pitch-driven fault detection with hysteresis
+  bool pitchPidFault;
+  {
+    static bool pitchFaultFlag = false;
+    if (!pitchFaultFlag)
+      pitchPidFault = currentAngle < -50 || currentAngle > 50;
+    else
+      pitchPidFault = currentAngle < -5 || currentAngle > 5;
+    pitchFaultFlag = pitchPidFault;
   }
 
-  unsigned long unsafeDuration = unsafe ? now - unsafeEntered : 0;
-
-  // Calculate dT in seconds (the actual time unit is arbitrary, as long as we're consistent)
-  static unsigned long lastSampleTime = 0;
-  static bool isFirstSample = true;
-  float deltaTSec = static_cast<float>(now - lastSampleTime) / 1000.0f;
-  lastSampleTime = now;
-  // The first sample is used only to set the sample time, so that
-  // the next sample (the first real one) can be evaluated with an
-  // accurate inter-sample deltaT.
-  if (isFirstSample) {
-    isFirstSample = false;
-    return;
-  }
+  // -----------------------------
+  // Pitch-driven PID
 
   // How far off are we?
   // TODO: currentAngleAdjusted is where we could subtract the
@@ -250,15 +266,14 @@ void updateMotors() {
   // The applied acceleration would need to be estimated from the
   // change in speed over time... we could use a circular buffer
   // with a configurable lookback?
+  // The challenge is that the IMU responds to accel changes
+  // extremely rapidly, making it difficult to accurately predict
+  // the accel perturbation.
   // We could also selectively suppress the IMU accel data if under
   // acceleration, shifting emphasis to the integrated gyro for
   // short-term noisy action.  The danger is that balancing is
   // inherently oscillatory, and so frequently under accel.
-  float currentAngleAdjusted = currentAngle;
-
-  // TODO: TBD whether this error has the correct sign - we may
-  // need to flip this to change the direction of the feedback.
-  float errorAngle = currentAngleAdjusted - desiredAngle;
+  float errorAngle = currentAngle - desiredAngle;
 
   // P: [-90, 90] typical
   float P = errorAngle;
@@ -294,21 +309,147 @@ void updateMotors() {
   static float errorDeltaPerSecondIIR = 0.0f;
   float errorDeltaPerSecond = (errorAngle - lastErrorAngle) / deltaTSec;
   // IIR; weight the accumulator heavily, and the new value lightly.
-  errorDeltaPerSecondIIR = gDIIRWeight * errorDeltaPerSecond * (1.0f - gDIIRWeight) * errorDeltaPerSecondIIR;
-  //Serial.printf("eA:%.1f,lea:%.1f,dT:%.3f,edps:%.1f,edpsIIR:%.1f\n", errorAngle, lastErrorAngle, deltaTSec, errorDeltaPerSecond, errorDeltaPerSecondIIR);
+  errorDeltaPerSecondIIR = gDIIRWeight * errorDeltaPerSecond + (1.0f - gDIIRWeight) * errorDeltaPerSecondIIR;
   lastErrorAngle = errorAngle;
   float D = errorDeltaPerSecondIIR;
+  // { // Debug
+  //   static unsigned long lastLogMillis = 0;
+  //   if (millis() - lastLogMillis > 50) {
+  //     Serial.printf("P:%.2f,I:%.2f,D:%.2f\n", P, I, D);
+  //     lastLogMillis = millis();
+  //   }
+  // }
+  accelOut = gPitchPidKp * P + gPitchPidKi * I + gPitchPidKd * D;
+  return pitchPidFault;
+}
 
-  float PIDOutput = gPidKp * P + gPidKi * I + gPidKd * D;
+
+// Given a desired speed, guide the pitch.
+bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget) {
+  // We could look at gPwmCurrentDuty directly, but we can disregard
+  // the deadzone and power scaling by deriving an effective velocity
+  // from the applied magnitude relative to the scaled power range.
+  // Constrain values lower than gPwmMinDuty to be equivalent to 0.
+  float currentVelocityNormalized = max(0.0f, (float)(gPwmDutyMagnitude - gPwmMinDuty) / (float)(gPwmMaxDuty - gPwmMinDuty));
+  bool velocityPidFault = currentVelocityNormalized < -0.01f || currentVelocityNormalized > 1.01f;
+  if (gPwmCurrentDuty < 0)
+    currentVelocityNormalized *= -1.0f;
+
+
+  // -----------------------------
+  // Velocity-driven PID
+  float errorVelocity = currentVelocityNormalized - desiredSpeedNormalized;
+  float P = errorVelocity;
+
+  static float errorIntegral = 0.0;
+  // Clear the integral when crossing the setpoint.
+  static int lastErrorSign = 0;
+  int currentErrorSign = std::signbit(errorVelocity);
+  if (currentErrorSign != lastErrorSign)
+    errorIntegral = 0;
+  lastErrorSign = currentErrorSign;
+
+  // Only accumulate error when we aren't saturated or stationary
+  float curVelMag = std::abs(currentVelocityNormalized);
+  if (curVelMag > 0.01f && curVelMag < 0.99f) {
+    errorIntegral += errorVelocity * deltaTSec;
+  }
+
+  float I = errorIntegral;
+
+  static float lastErrorVelocity = 0.0f;
+  static float errorDeltaPerSecondIIR = 0.0f;
+  float errorDeltaPerSecond = (errorVelocity - lastErrorVelocity) / deltaTSec;
+  // IIR; weight the accumulator heavily, and the new value lightly.
+  errorDeltaPerSecondIIR = gVelocityDIIRWeight * errorDeltaPerSecond + (1.0f - gVelocityDIIRWeight) * errorDeltaPerSecondIIR;
+  lastErrorVelocity = errorVelocity;
+  float D = errorDeltaPerSecondIIR;
+
+  pitchTarget = -60 * (gVelocityPidKp * P + gVelocityPidKi * I + gVelocityPidKd * D);
+  return velocityPidFault;
+}
+
+// TODO: Thoughts...
+// The bot is very short, making any correction movement produce
+// rapid angle changes.  Slow the response by raising the center
+// of mass.
+//
+// The jumpiness might be exacerbated by a high IMU Kp, allowing
+// large pitch deltas due to linear acceleration.  By reducing Kp
+// (e.g., to very small levels), we work more from the integrated
+// gyro, rather than the accel data.  Just need to be cautious to
+// still correct from the accel (gravity) vector, but maybe do
+// that via an adaptive weight that enabled gravity correction
+// only when the motor has been at near-constant velocity for a
+// short while (or just have a supression metric driven by non-zero)
+// PID accel output.
+//
+// Also, the IMU seems to be physically skewed - we might want to
+// configure a pitch trim, so that we can zero out the pitch.
+//
+// The motor response also seems to aggressive, ramping rapidly to
+// full power.  Not only does this cause wheel slippage, but it makes
+// small-scale balance very difficult.  Look into better low-range
+// control, possibly remapping the accel data?
+//
+// Very small-scale pitch values may result in accel data so small as
+// to fall under the quantization threshold.  Report & accumulate
+// accel as a float?
+//
+// The velicity setpoint adjustment seems inverted in feedback direction
+// (this has been addressed by negating velocityPidUpdate's setpoint output)
+void updateMotors() {
+  static int startupPwmAttenuation = 0;
+
+  // TODO: Refactor this:
+  // Inputs (signal, tuning), state, outputs
+
+  // ----------------------------------------
+  // Throttle
+  static unsigned long lastUpdate = 0;
+  unsigned long now = millis();
+  if (now - lastUpdate < g_update_period)
+    return;
+  lastUpdate = now;
+
+  // ---------------------------------------
+  // Inter-sample time scaling
+
+  // Calculate dT in seconds (the actual time unit is arbitrary, as long as we're consistent)
+  // TODO: Is the above true?
+  static unsigned long lastSampleTime = 0;
+  static bool isFirstSample = true;
+  float deltaTSec = static_cast<float>(now - lastSampleTime) / 1000.0f;
+  lastSampleTime = now;
+  // The first sample is used only to set the sample time, so that
+  // the next sample (the first real one) can be evaluated with an
+  // accurate inter-sample deltaT.
+  if (isFirstSample) {
+    isFirstSample = false;
+    return;
+  }
+
+  // --------------------------------------
+  // Pitch-driven PID
+  float desiredSpeedNormalized = 0.0f;
+  float desiredAngle;
+  bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredAngle);
+  desiredAngle += gPitchTrim;
+  gLastSetpoint = desiredAngle;
+  float pidAccelOut;
+  bool pitchPidFault = pitchPidUpdate(desiredAngle, deltaTSec, pidAccelOut);
+
+  // ----------------------------------
+  // Convert PID guidance to normalized PWM duty cycle
 
   // Note that we want the acceleration (not speed) to be modulated by the PID output.
   // TODO: Note that this is an integer, limiting fine-grained control especially close to 0
-  int rawAccel = constrain(PIDOutput, -255.0f, 255.0f);
+  int rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
 
   // Compress the speed range to the PWM min/max range
   //int constrainedAccel = map((int)std::abs(rawAccel), -gPwmMaxDuty, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
 
-  // Serial.printf("cA:%.1f,errA:%.1f,P:%.1f,I:%.1f,D:%.1f,PID:%.1f\n", currentAngle, errorAngle, P, I, D, PIDOutput);
+  // Serial.printf("cA:%.1f,errA:%.1f,P:%.1f,I:%.1f,D:%.1f,PID:%.1f\n", currentAngle, errorAngle, P, I, D, pidAccelOut);
 
   // Attenuate the PWM output on startup to prevent noisy output
   int constrainedAccel = constrain(rawAccel, -startupPwmAttenuation, startupPwmAttenuation);
@@ -327,19 +468,57 @@ void updateMotors() {
     gPwmCurrentDuty = (int)(motorIIR + 0.5);
   }
 
-  if (gPwmCurrentDuty < gDeadZone && gPwmCurrentDuty > -gDeadZone)
-    gPwmCurrentDuty = 0;
-
-  // Now compress the output to eliminate the dead zone.
-  // TODO: more nuanced mapping (e.g., near-zero dead-zone + fast-ramp)
-  gPwmDutyMagnitude = map(std::abs(gPwmCurrentDuty), gDeadZone, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
-
-  // Safety limiter - more than 500ms continuously at an unsafe angle will shut down the motor
-  // TODO: delay reactivation after recovery & reset the soft start
-  if (unsafeDuration > 500) {
+  if (gPwmCurrentDuty < gDeadZone && gPwmCurrentDuty > -gDeadZone) {
     gPwmCurrentDuty = 0;
     gPwmDutyMagnitude = 0;
+  } else {
+    // If we're not in the dead zone, compress the output to eliminate the dead zone
+    gPwmDutyMagnitude = map(std::abs(gPwmCurrentDuty), gDeadZone, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
+    // In case an out of range value was mapped otuside of the pwm range, clamp the magniture.
+    gPwmDutyMagnitude = constrain(gPwmDutyMagnitude, gPwmMinDuty, gPwmMaxDuty);
   }
+
+
+  // -----------------------
+  // Safety limiter
+  // More than 500ms continuously faulted (e.g., at an unsafe angle) will shut down the motor.
+  // Upon reactivation, the soft-start is reset
+  // TODO: Reset PID accumulators also?
+
+  // Track the contiguous duration over which any fault exists
+  static unsigned long pidFaultTimeMs = 0;
+  static bool pidFault = false;
+  bool wasPidFault = pidFault;
+  pidFault = velocityPidFault || pitchPidFault;
+  if (pidFault && !wasPidFault) {
+    if (velocityPidFault)
+      Serial.println("Velocity Fault!");
+    else
+      Serial.println("Pitch Fault!");
+    pidFaultTimeMs = now;
+  }
+
+  static bool faultLedState = false;
+  if (pidFault && (now - pidFaultTimeMs) > 100) {
+    // In case we're experimenting without the motor enabled,
+    // the onboard LED is used as a fault indicator.  The
+    // transition is placed here (instead of above) to ensure
+    // the LED corresponds with the effective fault treatment
+    // (i.e., including the 500ms delay).
+    if (!faultLedState) {
+      digitalWrite(LED_PIN, HIGH);
+      faultLedState = true;
+    }
+    gPwmCurrentDuty = 0;
+    gPwmDutyMagnitude = 0;
+    startupPwmAttenuation = 0;
+  } else if (faultLedState) {
+    digitalWrite(LED_PIN, LOW);
+    faultLedState = false;
+  }
+
+  // -----------------------
+  // Translate duty to control signals
 
   // Depending upon direction, the DRV8833 needs different pins driven.
   bool m1Driven;
@@ -403,7 +582,7 @@ void initImu() {
   }
 
   // Param: samples per second
-  filter.begin(100);
+  filter.begin(g_sample_freq);
   // THen:
   // filter.updateIMU(gx/y/z, ax/y/z, [optional dT]) // DPS (deg. per sec) / Gs
   // getRoll/Pitch/Yaw(), getGravityVector()
@@ -469,6 +648,12 @@ void handleInput() {
         if (right) filter.setKi(min(100.0, filter.getKi() + 0.1 * count));
         else if (left) filter.setKi(max(0.0, filter.getKi() - 0.1 * count));
         break;
+      case ePitchTrim:
+        if (right)
+          gPitchTrim = min(10.0f, gPitchTrim + 0.1f * count);
+        else if (left)
+          gPitchTrim = max(-10.0f, gPitchTrim - 0.1f * count);
+        break;
       case ePwmMin:
         if (right) gPwmMinDuty = min(gPwmMaxDuty, gPwmMinDuty + count);
         else if (left) gPwmMinDuty = max(0, gPwmMinDuty - count);
@@ -504,6 +689,12 @@ void handleInput() {
         else if (left)
           gDIIRWeight = max(0.0f, gDIIRWeight - 0.01f * count);
         break;
+      case eVelocityDIIRWeight:
+        if (right)
+          gVelocityDIIRWeight = min(1.0f, gVelocityDIIRWeight + 0.01f * count);
+        else if (left)
+          gVelocityDIIRWeight = max(0.0f, gVelocityDIIRWeight - 0.01f * count);
+        break;
       case eDeadzone:
         if (right)
           gDeadZone = min(255, gDeadZone + count);
@@ -516,14 +707,23 @@ void handleInput() {
         else if (left)
           gHBridgeIdleMode = eBraking;
         break;
-      case ePidKp:
-        adjustPidK(&gPidKp, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+      case ePitchPidKp:
+        adjustPidK(&gPitchPidKp, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
-      case ePidKi:
-        adjustPidK(&gPidKi, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+      case ePitchPidKi:
+        adjustPidK(&gPitchPidKi, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
-      case ePidKd:
-        adjustPidK(&gPidKd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+      case ePitchPidKd:
+        adjustPidK(&gPitchPidKd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        break;
+      case eVelocityPidKp:
+        adjustPidK(&gVelocityPidKp, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        break;
+      case eVelocityPidKi:
+        adjustPidK(&gVelocityPidKi, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        break;
+      case eVelocityPidKd:
+        adjustPidK(&gVelocityPidKd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
       case eIMUDisplay:
       default:
@@ -544,7 +744,7 @@ void updateDisplay() {
 
   static unsigned long lastUpdate = 0;
   unsigned int now = millis();
-  if (now - lastUpdate < 10)
+  if (now - lastUpdate < g_update_period)
     return;
   lastUpdate = now;
 
@@ -583,25 +783,31 @@ void updateRemoteDisplay() {
       snprintf(detailString, sizeof(detailString), "IMU: R%+04.1f P%+04.1f", gOrientation.roll, gOrientation.pitch);
       break;
     case eFusionKp:
-      sprintf(detailString, "Kp=[%.1f] Ki=%.1f", filter.getKp(), filter.getKi());
+      sprintf(detailString, "Kp=*%.1f Ki=%.1f", filter.getKp(), filter.getKi());
       break;
     case eFusionKi:
-      sprintf(detailString, "Kp=%.1f Ki=[%.1f]", filter.getKp(), filter.getKi());
+      sprintf(detailString, "Kp=%.1f Ki=*%.1f", filter.getKp(), filter.getKi());
       break;
     case ePwmMin:
-      sprintf(detailString, "pwm=[%d]-%d (%d)", gPwmMinDuty, gPwmMaxDuty, gPwmCurrentDuty);
+      sprintf(detailString, "pwm=*%d-%d (%d)", gPwmMinDuty, gPwmMaxDuty, gPwmCurrentDuty);
       break;
     case ePwmMax:
-      sprintf(detailString, "pwm=%d-[%d] (%d)", gPwmMinDuty, gPwmMaxDuty, gPwmCurrentDuty);
+      sprintf(detailString, "pwm=%d-*%d (%d)", gPwmMinDuty, gPwmMaxDuty, gPwmCurrentDuty);
       break;
     case ePwmFreq:
-      sprintf(detailString, "pwmFreq=[%d] (%d)", gPwmFreq, gPwmCurrentDuty);
+      sprintf(detailString, "pwmFreq=%d (%d)", gPwmFreq, gPwmCurrentDuty);
       break;
     case eMotorSmoothing:
       sprintf(detailString, "mSmooth: %.3f", gMotorFilter);
       break;
+    case ePitchTrim:
+      sprintf(detailString, "Trim: %.2f", gPitchTrim);
+      break;
     case eDIIRWeight:
-      sprintf(detailString, "D_IIR: %.2f", gDIIRWeight);
+      sprintf(detailString, "P_IIR: %.2f", gDIIRWeight);
+      break;
+    case eVelocityDIIRWeight:
+      sprintf(detailString, "V_IIR: %.2f", gVelocityDIIRWeight);
       break;
     case eDeadzone:
       sprintf(detailString, "mDead: %d", gDeadZone);
@@ -612,46 +818,52 @@ void updateRemoteDisplay() {
       else
         sprintf(detailString, "Idle= B  / [C]");
       break;
-    case ePidKp:
-      sprintf(detailString, "PID [%.2f] %.2f %.2f", gPidKp, gPidKi, gPidKd);
+    case ePitchPidKp:
+      sprintf(detailString, "pPID *%.2f %.2f %.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
       break;
-    case ePidKi:
-      sprintf(detailString, "PID %.2f [%.2f] %.2f", gPidKp, gPidKi, gPidKd);
+    case ePitchPidKi:
+      sprintf(detailString, "pPID %.2f *%.2f %.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
       break;
-    case ePidKd:
-      sprintf(detailString, "PID %.2f %.2f [%.2f]", gPidKp, gPidKi, gPidKd);
+    case ePitchPidKd:
+      sprintf(detailString, "pPID %.2f %.2f *%.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
+      break;
+    case eVelocityPidKp:
+      sprintf(detailString, "vPID *%.2f %.2f %.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
+      break;
+    case eVelocityPidKi:
+      sprintf(detailString, "vPID %.2f *%.2f %.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
+      break;
+    case eVelocityPidKd:
+      sprintf(detailString, "vPID %.2f %.2f *%.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
       break;
   }
 
   // Send to the remote
-  bool sent = false;
-  static unsigned long last_sent_millis = 0L;
 
+  static unsigned long last_title_sent_millis = 0L;
   char titleString[SCREEN_CHAR_WIDTH] = { 0 };
   static char lastTitleBuf[SCREEN_CHAR_WIDTH + 1] = {};
-  snprintf(titleString, sizeof(titleString), "P%+04.1f (%dfps)", gOrientation.pitch, lastFrameRate);
-  if (strcmp(titleString, lastTitleBuf) || now - last_sent_millis > 1000) {
+  snprintf(titleString, sizeof(titleString), "P%+04.1f M%d S%.1f", gOrientation.pitch, gPwmCurrentDuty, gLastSetpoint);  // lastFrameRate
+  if (strcmp(titleString, lastTitleBuf) || now - last_title_sent_millis > 1000) {
     remote->Send(MSGTYPE_CTL_TITLE, reinterpret_cast<const uint8_t*>(titleString), SEND_NULLTERMINATED);
     strcpy(lastTitleBuf, titleString);
-    sent = true;
+    last_title_sent_millis = now;
   }
 
+  static unsigned long last_detail_sent_millis = 0L;
   static char lastDetailBuf[SCREEN_CHAR_WIDTH + 1] = {};
-  if (strcmp(detailString, lastDetailBuf) || now - last_sent_millis > 1000) {
+  if (strcmp(detailString, lastDetailBuf) || now - last_detail_sent_millis > 1000) {
     remote->Send(MSGTYPE_CTL_DETAIL, (uint8_t*)detailString, SEND_NULLTERMINATED);
     strcpy(lastDetailBuf, detailString);
-    sent = true;
+    last_detail_sent_millis = now;
   }
-
-  if (sent)
-    last_sent_millis = now;
 }
 
 void updateOrientation() {
   static unsigned long lastUpdate = 0;
   unsigned int now = millis();
   // Target 100 Hz, coordinated with the rate we provided to filter.begin()
-  if (now - lastUpdate < 10)
+  if (now - lastUpdate < g_sample_period)
     return;
   lastUpdate = now;
 

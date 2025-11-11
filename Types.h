@@ -12,20 +12,30 @@ struct OrientationAngles {
 // To support multiple config modes...
 // TODO: Add the disply-only yaw/pitch/roll & diag for remote display, so that we can remove the SSD1306
 enum eConfigMode {
+  ePitchTrim,
+
   ePwmMin,
   ePwmMax,
   ePwmFreq,
-  ePidKp,
-  ePidKi,
-  ePidKd,
-  eMotorSmoothing,
+  
+  ePitchPidKp,
+  ePitchPidKi,
+  ePitchPidKd,
   eDIIRWeight,
+
+  eVelocityPidKp,
+  eVelocityPidKi,
+  eVelocityPidKd,
+  eVelocityDIIRWeight,
+
+  eMotorSmoothing,
   eDeadzone,
   eHBridgeIdle,
   eFusionKp,
   eFusionKi,
   eIMUDisplay,
   eMaxConfigMode,
+  eDefaultConfigMode = ePitchTrim
 };
 
 
