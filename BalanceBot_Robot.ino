@@ -104,16 +104,18 @@ eConfigMode gCurrentConfigMode = eDefaultConfigMode;
 // TODO: Settings persistence
 
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
-int gPwmMinDuty = 22;
-int gPwmMaxDuty = 160;  // ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
-int gPwmCurrentDuty = 0;
-int gPwmDutyMagnitude = 0;
+// The following three are floats (instead of int) to avoid runtime conversion
+// to float when comparing to gPwmDutyAccumulator / gPwmDutyAppliedMagnitude
+float gDeadZone = 1;
+float gPwmMinDuty = 22;
+float gPwmMaxDuty = 160;                  // ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
+float gPwmDutyAccumulator = 0.0f;       // The raw PWM target
+float gPwmDutyAppliedMagnitude = 0.0f;  // gPwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
 int gPwmFreq = 2 * g_update_freq;
-int gDeadZone = 1;
 float gLastSetpoint = 0.0f;
 float gPitchTrim = 0.8f;
 
-float gPitchPidKp = 0.17f; // Or 0.24,0,0.06
+float gPitchPidKp = 0.17f;  // Or 0.24,0,0.06
 float gPitchPidKi = 0.0f;
 float gPitchPidKd = 0.07f;
 
@@ -295,8 +297,8 @@ bool pitchPidUpdate(float desiredAngle, float deltaTSec, float& accelOut) {
     errorIntegral = 0;
   lastErrorSign = currentErrorSign;
 
-  // Only accumulate error when we aren't saturated
-  if (std::abs(gPwmCurrentDuty) < gPwmMaxDuty) {
+  // Only accumulate error when we aren't saturated (or very near to it)
+  if (gPwmDutyAppliedMagnitude < (gPwmMaxDuty - 1.0f)) {
     errorIntegral += errorAngle * deltaTSec;
   }
 
@@ -331,13 +333,13 @@ bool pitchPidUpdate(float desiredAngle, float deltaTSec, float& accelOut) {
 
 // Given a desired speed, guide the pitch.
 bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget) {
-  // We could look at gPwmCurrentDuty directly, but we can disregard
+  // We could look at gPwmDutyAccumulator directly, but we can disregard
   // the deadzone and power scaling by deriving an effective velocity
   // from the applied magnitude relative to the scaled power range.
   // Constrain values lower than gPwmMinDuty to be equivalent to 0.
-  float currentVelocityNormalized = max(0.0f, (float)(gPwmDutyMagnitude - gPwmMinDuty) / (float)(gPwmMaxDuty - gPwmMinDuty));
+  float currentVelocityNormalized = max(0.0f, (gPwmDutyAppliedMagnitude - gPwmMinDuty) / (gPwmMaxDuty - gPwmMinDuty));
   bool velocityPidFault = currentVelocityNormalized < -0.01f || currentVelocityNormalized > 1.01f;
-  if (gPwmCurrentDuty < 0)
+  if (gPwmDutyAccumulator < 0.0f)
     currentVelocityNormalized *= -1.0f;
 
 
@@ -449,38 +451,33 @@ void updateMotors() {
 
   // Note that we want the acceleration (not speed) to be modulated by the PID output.
   // TODO: Note that this is an integer, limiting fine-grained control especially close to 0
-  int rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
-
-  // Compress the speed range to the PWM min/max range
-  //int constrainedAccel = map((int)std::abs(rawAccel), -gPwmMaxDuty, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
-
-  // Serial.printf("cA:%.1f,errA:%.1f,P:%.1f,I:%.1f,D:%.1f,PID:%.1f\n", currentAngle, errorAngle, P, I, D, pidAccelOut);
+  float rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
 
   // Attenuate the PWM output on startup to prevent noisy output
-  int constrainedAccel = constrain(rawAccel, -startupPwmAttenuation, startupPwmAttenuation);
+  float constrainedAccel = constrain(rawAccel, (float)-startupPwmAttenuation, (float)startupPwmAttenuation);
   if (startupPwmAttenuation < 255)
     ++startupPwmAttenuation;
 
   // Adjust the speed by the desired relative acceleration, constraining the duty cycle to the PWM limits.
   // Note that this can be negative, to indicate a reversed direction.
   // TODO: Permit brief excusions beyond gPwmMaxDuty (up to 255) for recovery, but trigger 'unsafe' if operating beyond saturation for more than briefly?)
-  gPwmCurrentDuty = constrain(gPwmCurrentDuty + constrainedAccel, -gPwmMaxDuty, gPwmMaxDuty);
+  gPwmDutyAccumulator = constrain(gPwmDutyAccumulator + constrainedAccel, -gPwmMaxDuty, gPwmMaxDuty);
 
   // Optional filter
+  // TODO: Predictive window-based outlier attenuation, but otherwise allow small variations with no additional latency?
   if (gMotorFilter <= 0.999f) {
     static float motorIIR = 0;
-    motorIIR = (gMotorFilter * gPwmCurrentDuty) + (1.0 - gMotorFilter) * motorIIR;
-    gPwmCurrentDuty = (int)(motorIIR + 0.5);
+    motorIIR = (gMotorFilter * gPwmDutyAccumulator) + (1.0 - gMotorFilter) * motorIIR;
+    gPwmDutyAccumulator = (motorIIR + 0.5);
   }
 
-  if (gPwmCurrentDuty < gDeadZone && gPwmCurrentDuty > -gDeadZone) {
-    gPwmCurrentDuty = 0;
-    gPwmDutyMagnitude = 0;
+  if (gPwmDutyAccumulator < gDeadZone && gPwmDutyAccumulator > -gDeadZone) {
+    gPwmDutyAccumulator = 0.0f;
+    gPwmDutyAppliedMagnitude = 0.0f;
   } else {
-    // If we're not in the dead zone, compress the output to eliminate the dead zone
-    gPwmDutyMagnitude = map(std::abs(gPwmCurrentDuty), gDeadZone, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
-    // In case an out of range value was mapped otuside of the pwm range, clamp the magniture.
-    gPwmDutyMagnitude = constrain(gPwmDutyMagnitude, gPwmMinDuty, gPwmMaxDuty);
+    // We're not in the dead zone; compress the output to eliminate the dead zone
+    // TODO: each of these coersced constraints can be changed to float as well?
+    gPwmDutyAppliedMagnitude = map(std::abs(gPwmDutyAccumulator), gDeadZone, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
   }
 
 
@@ -514,8 +511,8 @@ void updateMotors() {
       digitalWrite(LED_PIN, HIGH);
       faultLedState = true;
     }
-    gPwmCurrentDuty = 0;
-    gPwmDutyMagnitude = 0;
+    gPwmDutyAccumulator = 0.0f;
+    gPwmDutyAppliedMagnitude = 0.0f;
     startupPwmAttenuation = 0;
   } else if (faultLedState) {
     digitalWrite(LED_PIN, LOW);
@@ -528,16 +525,17 @@ void updateMotors() {
   // Depending upon direction, the DRV8833 needs different pins driven.
   bool m1Driven;
   int m1 = 0, m2 = 0;
-  if (gPwmCurrentDuty < 0) {
+  int quantizedMagnitude = (int)std::round(gPwmDutyAppliedMagnitude);
+  if (gPwmDutyAccumulator < 0.0f) {
     // Note: for fast-decay (coasting), one pin is pulled low, the other is high at the desired duty.
     // For slow-decay (braking), one pin is pulled high, the other is low at the desired duty.
     // Because analogWrite specified the high-side duty cycle, slow-decay mode means we invert both
     // of the duty cycles (i.e., 255 on on to hold it high, and 255-duty on the other, so that it is
     // LOW at the desired duty)
-    m2 = gPwmDutyMagnitude;
+    m2 = quantizedMagnitude;
     m1Driven = false;
   } else {
-    m1 = gPwmDutyMagnitude;
+    m1 = quantizedMagnitude;
     m1Driven = true;
   }
 
@@ -660,12 +658,12 @@ void handleInput() {
           gPitchTrim = max(-10.0f, gPitchTrim - 0.1f * count);
         break;
       case ePwmMin:
-        if (right) gPwmMinDuty = min(gPwmMaxDuty, gPwmMinDuty + count);
-        else if (left) gPwmMinDuty = max(0, gPwmMinDuty - count);
+        if (right) gPwmMinDuty = min(gPwmMaxDuty, gPwmMinDuty + (float) count);
+        else if (left) gPwmMinDuty = max(0.0f, gPwmMinDuty - (float) count);
         break;
       case ePwmMax:
-        if (right) gPwmMaxDuty = min(255, gPwmMaxDuty + count);
-        else if (left) gPwmMaxDuty = max(gPwmMinDuty, gPwmMaxDuty - count);
+        if (right) gPwmMaxDuty = min(255.0f, gPwmMaxDuty + (float) count);
+        else if (left) gPwmMaxDuty = max(gPwmMinDuty, gPwmMaxDuty - (float) count);
         break;
       case ePwmFreq:
         {
@@ -702,9 +700,9 @@ void handleInput() {
         break;
       case eDeadzone:
         if (right)
-          gDeadZone = min(255, gDeadZone + count);
+          gDeadZone = min(255.0f, gDeadZone + (float) count);
         else if (left)
-          gDeadZone = max(0, gDeadZone - count);
+          gDeadZone = max(0.0f, gDeadZone - (float) count);
         break;
       case eHBridgeIdle:
         if (right)
@@ -794,13 +792,13 @@ void updateRemoteDisplay() {
       sprintf(detailString, "Kp=%.1f Ki=*%.1f", filter.getKp(), filter.getKi());
       break;
     case ePwmMin:
-      sprintf(detailString, "pwm=*%d-%d (%d)", gPwmMinDuty, gPwmMaxDuty, gPwmCurrentDuty);
+      sprintf(detailString, "pwm=*%.0f-%.0f (%.1f)", gPwmMinDuty, gPwmMaxDuty, gPwmDutyAccumulator);
       break;
     case ePwmMax:
-      sprintf(detailString, "pwm=%d-*%d (%d)", gPwmMinDuty, gPwmMaxDuty, gPwmCurrentDuty);
+      sprintf(detailString, "pwm=%.0f-*%.0f (%.1f)", gPwmMinDuty, gPwmMaxDuty, gPwmDutyAccumulator);
       break;
     case ePwmFreq:
-      sprintf(detailString, "pwmFreq=%d (%d)", gPwmFreq, gPwmCurrentDuty);
+      sprintf(detailString, "pwmFreq=%d (%.1f)", gPwmFreq, gPwmDutyAccumulator);
       break;
     case eMotorSmoothing:
       sprintf(detailString, "mSmooth: %.3f", gMotorFilter);
@@ -815,7 +813,7 @@ void updateRemoteDisplay() {
       sprintf(detailString, "V_IIR: %.2f", gVelocityDIIRWeight);
       break;
     case eDeadzone:
-      sprintf(detailString, "mDead: %d", gDeadZone);
+      sprintf(detailString, "mDead: %.0f", gDeadZone);
       break;
     case eHBridgeIdle:
       if (gHBridgeIdleMode == eBraking)
@@ -848,7 +846,7 @@ void updateRemoteDisplay() {
   static unsigned long last_title_sent_millis = 0L;
   char titleString[SCREEN_CHAR_WIDTH] = { 0 };
   static char lastTitleBuf[SCREEN_CHAR_WIDTH + 1] = {};
-  snprintf(titleString, sizeof(titleString), "P%+04.1f M%d S%.1f", gOrientation.pitch, gPwmCurrentDuty, gLastSetpoint);  // lastFrameRate
+  snprintf(titleString, sizeof(titleString), "P%+04.1f M%.1f S%.1f", gOrientation.pitch, gPwmDutyAccumulator, gLastSetpoint);  // lastFrameRate
   if (strcmp(titleString, lastTitleBuf) || now - last_title_sent_millis > 1000) {
     remote->Send(MSGTYPE_CTL_TITLE, reinterpret_cast<const uint8_t*>(titleString), SEND_NULLTERMINATED);
     strcpy(lastTitleBuf, titleString);
