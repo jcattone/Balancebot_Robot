@@ -89,6 +89,9 @@ eConfigMode gCurrentConfigMode = eDefaultConfigMode;
 #define MOTORA_PIN_2 26
 #define MOTORB_PIN_1 32
 #define MOTORB_PIN_2 33
+const int PWM_PRECISION = 12;
+const int PWM_MAX = ((1 << PWM_PRECISION) - 1);
+const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION-8));
 
 #define LED_PIN 2
 
@@ -102,6 +105,10 @@ eConfigMode gCurrentConfigMode = eDefaultConfigMode;
 // TODO: Clean up wiring
 // TODO: Easier onboard vs. usb power switching
 // TODO: Settings persistence
+// TODO: Allow a small anti-stiction reservoir (reset when the motor is turned off) to briefly (and mildly) boost the power when transitioning out of a full-stop
+// TODO: Sometimes locks up after a fall (motor stuck running, no further variation or remote response)
+//       (might have been related to a buffer overflow when writing to the remote display buffer)
+// TODO: Constrain pwm freq >= g_update_freq, and < 19k (if PWM_PRECISION = 12)
 
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
 // The following three are floats (instead of int) to avoid runtime conversion
@@ -115,7 +122,7 @@ int gPwmFreq = 2 * g_update_freq;
 float gLastSetpoint = 0.0f;
 float gPitchTrim = 0.8f;
 
-float gPitchPidKp = 0.17f;  // Or 0.24,0,0.06
+float gPitchPidKp = 0.23f;  // Or 0.16 - 0.24 seems to work well with Kd=~0.06-0.07
 float gPitchPidKi = 0.0f;
 float gPitchPidKd = 0.07f;
 
@@ -194,6 +201,12 @@ void setup() {
   analogWriteFrequency(MOTORA_PIN_2, gPwmFreq);
   analogWriteFrequency(MOTORB_PIN_1, gPwmFreq);
   analogWriteFrequency(MOTORB_PIN_2, gPwmFreq);
+
+  analogWriteResolution(MOTORA_PIN_1, PWM_PRECISION); // scale all pwm output by 2^4 (16)
+  analogWriteResolution(MOTORA_PIN_2, PWM_PRECISION);
+  analogWriteResolution(MOTORB_PIN_1, PWM_PRECISION);
+  analogWriteResolution(MOTORB_PIN_2, PWM_PRECISION);
+
   // Initializing the motor pins uniformly solves the 'jerk on startup' problem
   if (gHBridgeIdleMode == eBraking) {
     analogWrite(MOTORA_PIN_1, 1);
@@ -468,7 +481,7 @@ void updateMotors() {
   if (gMotorFilter <= 0.999f) {
     static float motorIIR = 0;
     motorIIR = (gMotorFilter * gPwmDutyAccumulator) + (1.0 - gMotorFilter) * motorIIR;
-    gPwmDutyAccumulator = (motorIIR + 0.5);
+    gPwmDutyAccumulator = motorIIR;
   }
 
   if (gPwmDutyAccumulator < gDeadZone && gPwmDutyAccumulator > -gDeadZone) {
@@ -483,9 +496,8 @@ void updateMotors() {
 
   // -----------------------
   // Safety limiter
-  // More than 500ms continuously faulted (e.g., at an unsafe angle) will shut down the motor.
+  // More than 100ms continuously faulted (e.g., at an unsafe angle) will shut down the motor.
   // Upon reactivation, the soft-start is reset
-  // TODO: Reset PID accumulators also?
 
   // Track the contiguous duration over which any fault exists
   static unsigned long pidFaultTimeMs = 0;
@@ -523,9 +535,10 @@ void updateMotors() {
   // Translate duty to control signals
 
   // Depending upon direction, the DRV8833 needs different pins driven.
+  // We also scale the magnitude to match the higher precision of the PWM duty cycle (e.g., 12 bits instead of 8)
   bool m1Driven;
   int m1 = 0, m2 = 0;
-  int quantizedMagnitude = (int)std::round(gPwmDutyAppliedMagnitude);
+  int quantizedMagnitude = (int)std::round(gPwmDutyAppliedMagnitude * (1 << (PWM_PRECISION-8)));
   if (gPwmDutyAccumulator < 0.0f) {
     // Note: for fast-decay (coasting), one pin is pulled low, the other is high at the desired duty.
     // For slow-decay (braking), one pin is pulled high, the other is low at the desired duty.
@@ -544,8 +557,8 @@ void updateMotors() {
     // To invert the H-Bridge input, invert the levels and also
     // swap the driven IO to maintain direction.
     int m1Temp = m1;
-    m1 = 255 - m2;
-    m2 = 255 - m1Temp;
+    m1 = PWM_MAX - m2;
+    m2 = PWM_MAX - m1Temp;
     m1Driven = !m1Driven;
   }
 
@@ -786,58 +799,58 @@ void updateRemoteDisplay() {
       snprintf(detailString, sizeof(detailString), "IMU: R%+04.1f P%+04.1f", gOrientation.roll, gOrientation.pitch);
       break;
     case eFusionKp:
-      sprintf(detailString, "Kp=*%.1f Ki=%.1f", filter.getKp(), filter.getKi());
+      snprintf(detailString, sizeof(detailString), "Kp=*%.1f Ki=%.1f", filter.getKp(), filter.getKi());
       break;
     case eFusionKi:
-      sprintf(detailString, "Kp=%.1f Ki=*%.1f", filter.getKp(), filter.getKi());
+      snprintf(detailString, sizeof(detailString), "Kp=%.1f Ki=*%.1f", filter.getKp(), filter.getKi());
       break;
     case ePwmMin:
-      sprintf(detailString, "pwm=*%.0f-%.0f (%.1f)", gPwmMinDuty, gPwmMaxDuty, gPwmDutyAccumulator);
+      snprintf(detailString, sizeof(detailString), "pwm=*%.0f-%.0f (%.1f)", gPwmMinDuty, gPwmMaxDuty, gPwmDutyAccumulator);
       break;
     case ePwmMax:
-      sprintf(detailString, "pwm=%.0f-*%.0f (%.1f)", gPwmMinDuty, gPwmMaxDuty, gPwmDutyAccumulator);
+      snprintf(detailString, sizeof(detailString), "pwm=%.0f-*%.0f (%.1f)", gPwmMinDuty, gPwmMaxDuty, gPwmDutyAccumulator);
       break;
     case ePwmFreq:
-      sprintf(detailString, "pwmFreq=%d (%.1f)", gPwmFreq, gPwmDutyAccumulator);
+      snprintf(detailString, sizeof(detailString), "pwmFreq=%d (%.1f)", gPwmFreq, gPwmDutyAccumulator);
       break;
     case eMotorSmoothing:
-      sprintf(detailString, "mSmooth: %.3f", gMotorFilter);
+      snprintf(detailString, sizeof(detailString), "mSmooth: %.3f", gMotorFilter);
       break;
     case ePitchTrim:
-      sprintf(detailString, "Trim: %.2f", gPitchTrim);
+      snprintf(detailString, sizeof(detailString), "Trim: %.2f", gPitchTrim);
       break;
     case eDIIRWeight:
-      sprintf(detailString, "P_IIR: %.2f", gDIIRWeight);
+      snprintf(detailString, sizeof(detailString), "P_IIR: %.2f", gDIIRWeight);
       break;
     case eVelocityDIIRWeight:
-      sprintf(detailString, "V_IIR: %.2f", gVelocityDIIRWeight);
+      snprintf(detailString, sizeof(detailString), "V_IIR: %.2f", gVelocityDIIRWeight);
       break;
     case eDeadzone:
-      sprintf(detailString, "mDead: %.0f", gDeadZone);
+      snprintf(detailString, sizeof(detailString), "mDead: %.0f", gDeadZone);
       break;
     case eHBridgeIdle:
       if (gHBridgeIdleMode == eBraking)
-        sprintf(detailString, "Idle=[B] /  C ");
+        snprintf(detailString, sizeof(detailString), "Idle=[B] /  C ");
       else
-        sprintf(detailString, "Idle= B  / [C]");
+        snprintf(detailString, sizeof(detailString), "Idle= B  / [C]");
       break;
     case ePitchPidKp:
-      sprintf(detailString, "pPID *%.2f %.2f %.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
+      snprintf(detailString, sizeof(detailString), "pPID *%.2f %.2f %.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
       break;
     case ePitchPidKi:
-      sprintf(detailString, "pPID %.2f *%.2f %.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
+      snprintf(detailString, sizeof(detailString), "pPID %.2f *%.2f %.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
       break;
     case ePitchPidKd:
-      sprintf(detailString, "pPID %.2f %.2f *%.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
+      snprintf(detailString, sizeof(detailString), "pPID %.2f %.2f *%.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
       break;
     case eVelocityPidKp:
-      sprintf(detailString, "vPID *%.2f %.2f %.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
+      snprintf(detailString, sizeof(detailString), "vPID *%.2f %.2f %.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
       break;
     case eVelocityPidKi:
-      sprintf(detailString, "vPID %.2f *%.2f %.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
+      snprintf(detailString, sizeof(detailString), "vPID %.2f *%.2f %.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
       break;
     case eVelocityPidKd:
-      sprintf(detailString, "vPID %.2f %.2f *%.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
+      snprintf(detailString, sizeof(detailString), "vPID %.2f %.2f *%.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
       break;
   }
 
