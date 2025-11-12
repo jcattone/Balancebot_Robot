@@ -97,6 +97,11 @@ eConfigMode gCurrentConfigMode = eDefaultConfigMode;
 // TODO: Remote-control steering
 // TODO: Correction from bounce/bump is often excessive (insufficient compensation, or maybe needs to go above maxpwm briefly?)
 // TODO: Wheel encoders for feedback / auto-calibrate trim
+// TODO: Floor-proximity and collision sensors
+// TODO: Third-tier w/ additional sensors?
+// TODO: Clean up wiring
+// TODO: Easier onboard vs. usb power switching
+// TODO: Settings persistence
 
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
 int gPwmMinDuty = 22;
