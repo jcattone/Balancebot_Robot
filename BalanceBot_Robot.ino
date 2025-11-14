@@ -1,14 +1,17 @@
 // Pinout:
 //   I2C SDA: 21
 //   I2C SCL: 22
-//   Analog Joystick X/Y: 25, 26
 // Devices
+//   2S-18650: Motor power
+//   MP1584 buck converter (5V out for MCU)
 //   MPU-6050: I2C
-//     22uF cap across power
-//   SSD1306 128x32: I2C
+//     (optional) 22uF cap across power
 //   DRV8833
-//     Motor 1: Pins 18, 19
+//     Motor 1: Pins 25, 26
+//     Motor 2: Pins 32, 33
 //   10k pull-up resistors on both I2C lines
+//   1000uF cap on motor power
+//   0.1uF bypass cap on each motor power
 
 #include <cmath>  // sin()
 
@@ -44,6 +47,9 @@ using namespace EspNowRemote;
 
 RmtBase* remote = EspNowRemote::MakeController();
 joystick_state_t g_joystick_state = {};
+joystick_analog_state_t g_joystick_analog_state = {};
+
+uint8_t g_last_message_type = MSGTYPE_UNKNOWN;
 
 const int g_sample_freq = 200;
 const int g_update_freq = 200;
@@ -109,22 +115,35 @@ const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION-8));
 // TODO: Sometimes locks up after a fall (motor stuck running, no further variation or remote response)
 //       (might have been related to a buffer overflow when writing to the remote display buffer)
 // TODO: Constrain pwm freq >= g_update_freq, and < 19k (if PWM_PRECISION = 12)
+// TODO: Separate params for coasting/braking modes
+// TODO: Partially attenuate Angle PID Kp based on angle max IIR, allowing response
+//       to become more subtle near balance, but immediately ramp up for correction.
+//       Maybe other params are adaptive as well?
 
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
 // The following three are floats (instead of int) to avoid runtime conversion
 // to float when comparing to gPwmDutyAccumulator / gPwmDutyAppliedMagnitude
 float gDeadZone = 1;
-float gPwmMinDuty = 22;
-float gPwmMaxDuty = 160;                  // ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
+float gPwmMinDuty = 23;
+float gPwmMaxDuty = 200;                // 160 is nominal ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
+                                        // but a bit more oomph helps recovery
 float gPwmDutyAccumulator = 0.0f;       // The raw PWM target
 float gPwmDutyAppliedMagnitude = 0.0f;  // gPwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
-int gPwmFreq = 2 * g_update_freq;
-float gLastSetpoint = 0.0f;
-float gPitchTrim = 0.8f;
+int gPwmFreq = 2 * g_update_freq;       // Default ensures that updates are applied in less than one update cycle
+float gPitchTrim = -2.6f;               // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
 
-float gPitchPidKp = 0.23f;  // Or 0.16 - 0.24 seems to work well with Kd=~0.06-0.07
+// The fraction shifted from one motor to the other
+// TODO: Implement PID control for this, driven by encoder input?
+float gYawTrim = 0.0f;
+
+float gSpeedBias = 0.0f;
+float gSteeringBias = 0.0f;
+
+// Or 0.16 - 0.24 seems to work well with Kd=~0.06-0.07
+// Lower values help with smooth stability at low deflection, but don't respond quickly enough to correct for nudges
+float gPitchPidKp = 0.30f;  
 float gPitchPidKi = 0.0f;
-float gPitchPidKd = 0.07f;
+float gPitchPidKd = 0.05f;
 
 float gMotorFilter = 0.684f;
 float gDIIRWeight = 0.16f;
@@ -159,13 +178,20 @@ bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len) {
       // Loopback status from the local remote instance... not from the controller.
       memcpy(textBuffer[1], data, data_len);
       textBuffer[1][data_len] = 0;
-      //#ifdef SERIAL_DIAG
+      #ifdef SERIAL_DIAG
       Serial.println((const char*)data);
-      //#endif
+      #endif
       break;
 
     case MSGTYPE_RMT_JOYSTICK:
       memcpy(&g_joystick_state, data, data_len);
+      g_last_message_type = msg_type;
+      last_hid_input_timestamp = micros();
+      break;
+
+    case MSGTYPE_RMT_JOYSTICK_ANALOG:
+      memcpy(&g_joystick_analog_state, data, data_len);
+      g_last_message_type = msg_type;
       last_hid_input_timestamp = micros();
       break;
   }
@@ -451,11 +477,10 @@ void updateMotors() {
 
   // --------------------------------------
   // Pitch-driven PID
-  float desiredSpeedNormalized = 0.0f;
+  float desiredSpeedNormalized = gSpeedBias * 0.5; // The throttle must leave enough headroom to permit balance correction
   float desiredAngle;
   bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredAngle);
   desiredAngle += gPitchTrim;
-  gLastSetpoint = desiredAngle;
   float pidAccelOut;
   bool pitchPidFault = pitchPidUpdate(desiredAngle, deltaTSec, pidAccelOut);
 
@@ -523,9 +548,14 @@ void updateMotors() {
       digitalWrite(LED_PIN, HIGH);
       faultLedState = true;
     }
+
+    // Reset a bunch of things when recovering from a fault
     gPwmDutyAccumulator = 0.0f;
     gPwmDutyAppliedMagnitude = 0.0f;
     startupPwmAttenuation = 0;
+    gSpeedBias = 0;
+    gSteeringBias = 0;
+
   } else if (faultLedState) {
     digitalWrite(LED_PIN, LOW);
     faultLedState = false;
@@ -536,19 +566,36 @@ void updateMotors() {
 
   // Depending upon direction, the DRV8833 needs different pins driven.
   // We also scale the magnitude to match the higher precision of the PWM duty cycle (e.g., 12 bits instead of 8)
+  // gYawTrim is used to slow one of the two motors to induce a turn.
+  // TODO: This needs to respect the minPwm... if attempting to reduce below min PWM, add to the other side
   bool m1Driven;
-  int m1 = 0, m2 = 0;
-  int quantizedMagnitude = (int)std::round(gPwmDutyAppliedMagnitude * (1 << (PWM_PRECISION-8)));
+  int ma1 = 0, ma2 = 0;
+  int mb1 = 0, mb2 = 0;
+  
+  float scaledPwmMagnitudeA = gPwmDutyAppliedMagnitude * (1 << (PWM_PRECISION-8));
+  float scaledPwmMagnitudeB = scaledPwmMagnitudeA;
+  float effectiveYaw = gYawTrim + gSteeringBias;
+  // TODO: Allow each motor to be driven forward or backward independently
+  if (effectiveYaw > 0.0f) {
+    scaledPwmMagnitudeB *= (1.0f - effectiveYaw);
+  } else if(effectiveYaw < 0.0f) {
+    scaledPwmMagnitudeA *= (1.0f + effectiveYaw);
+  }
+
+  int quantizedMagnitudeA = (int)std::round(scaledPwmMagnitudeA);
+  int quantizedMagnitudeB = (int)std::round(scaledPwmMagnitudeB);
   if (gPwmDutyAccumulator < 0.0f) {
     // Note: for fast-decay (coasting), one pin is pulled low, the other is high at the desired duty.
     // For slow-decay (braking), one pin is pulled high, the other is low at the desired duty.
     // Because analogWrite specified the high-side duty cycle, slow-decay mode means we invert both
     // of the duty cycles (i.e., 255 on on to hold it high, and 255-duty on the other, so that it is
     // LOW at the desired duty)
-    m2 = quantizedMagnitude;
+    ma2 = quantizedMagnitudeA;
+    mb2 = quantizedMagnitudeB;
     m1Driven = false;
   } else {
-    m1 = quantizedMagnitude;
+    ma1 = quantizedMagnitudeA;
+    mb1 = quantizedMagnitudeB;
     m1Driven = true;
   }
 
@@ -556,17 +603,22 @@ void updateMotors() {
   if (gHBridgeIdleMode == eBraking) {
     // To invert the H-Bridge input, invert the levels and also
     // swap the driven IO to maintain direction.
-    int m1Temp = m1;
-    m1 = PWM_MAX - m2;
-    m2 = PWM_MAX - m1Temp;
+    int m1Temp = ma1;
+    ma1 = PWM_MAX - ma2;
+    ma2 = PWM_MAX - m1Temp;
+
+    m1Temp = mb1;
+    mb1 = PWM_MAX - mb2;
+    mb2 = PWM_MAX - m1Temp;
+
     m1Driven = !m1Driven;
   }
 
   // Update the motor PWM.
-  analogWrite(MOTORA_PIN_1, m1);
-  analogWrite(MOTORA_PIN_2, m2);
-  analogWrite(MOTORB_PIN_1, m1);
-  analogWrite(MOTORB_PIN_2, m2);
+  analogWrite(MOTORA_PIN_1, ma1);
+  analogWrite(MOTORA_PIN_2, ma2);
+  analogWrite(MOTORB_PIN_1, mb1);
+  analogWrite(MOTORB_PIN_2, mb2);
 }
 
 void initDisplay() {
@@ -619,7 +671,14 @@ void handleInput() {
   last_hid_message_processed = last_hid_input_timestamp;
 
   // Process joystick events if there's an unprocessed count.
-  if (g_joystick_state.count > 0) {
+  if(g_last_message_type == MSGTYPE_RMT_JOYSTICK_ANALOG) {
+    // TODO: Steering requires some pitch, or to pivot in place...
+    // -1.0 .. +1.0
+    gSteeringBias = g_joystick_analog_state.x_axis * 0.6;
+    // Remap to +/- 20 degrees
+    gSpeedBias = g_joystick_analog_state.y_axis * 3.0f;
+  }
+  else if (g_last_message_type == MSGTYPE_RMT_JOYSTICK && g_joystick_state.count > 0) {
     // Extract the joystick state
     bool up = (g_joystick_state.joystick_direction & JOYSTICK_UP) != 0;
     bool down = (g_joystick_state.joystick_direction & JOYSTICK_DOWN) != 0;
@@ -859,7 +918,7 @@ void updateRemoteDisplay() {
   static unsigned long last_title_sent_millis = 0L;
   char titleString[SCREEN_CHAR_WIDTH] = { 0 };
   static char lastTitleBuf[SCREEN_CHAR_WIDTH + 1] = {};
-  snprintf(titleString, sizeof(titleString), "P%+04.1f M%.1f S%.1f", gOrientation.pitch, gPwmDutyAccumulator, gLastSetpoint);  // lastFrameRate
+  snprintf(titleString, sizeof(titleString), "Pit=%+04.1f PWM=%.1f", gOrientation.pitch, gPwmDutyAccumulator);  // lastFrameRate
   if (strcmp(titleString, lastTitleBuf) || now - last_title_sent_millis > 1000) {
     remote->Send(MSGTYPE_CTL_TITLE, reinterpret_cast<const uint8_t*>(titleString), SEND_NULLTERMINATED);
     strcpy(lastTitleBuf, titleString);
