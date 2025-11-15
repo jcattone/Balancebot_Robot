@@ -102,8 +102,6 @@ const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION-8));
 #define LED_PIN 2
 
 // TODO: Motor gain/trim (i.e., adjust for differences in left/right speed or stiction-break)
-// TODO: Motor ratio as proxy for steering
-// TODO: Remote-control steering
 // TODO: Correction from bounce/bump is often excessive (insufficient compensation, or maybe needs to go above maxpwm briefly?)
 // TODO: Wheel encoders for feedback / auto-calibrate trim
 // TODO: Floor-proximity and collision sensors
@@ -376,6 +374,8 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
   // the deadzone and power scaling by deriving an effective velocity
   // from the applied magnitude relative to the scaled power range.
   // Constrain values lower than gPwmMinDuty to be equivalent to 0.
+  // TODO: This doesn't account for steering, which attenuates one motor.
+  // as a result, when steering is applied, the current velocity is overestimated.
   float currentVelocityNormalized = max(0.0f, (gPwmDutyAppliedMagnitude - gPwmMinDuty) / (gPwmMaxDuty - gPwmMinDuty));
   bool velocityPidFault = currentVelocityNormalized < -0.01f || currentVelocityNormalized > 1.01f;
   if (gPwmDutyAccumulator < 0.0f)
@@ -553,8 +553,8 @@ void updateMotors() {
     gPwmDutyAccumulator = 0.0f;
     gPwmDutyAppliedMagnitude = 0.0f;
     startupPwmAttenuation = 0;
-    gSpeedBias = 0;
-    gSteeringBias = 0;
+    gSpeedBias = 0.0f;
+    gSteeringBias = 0.0f;
 
   } else if (faultLedState) {
     digitalWrite(LED_PIN, LOW);
@@ -572,15 +572,18 @@ void updateMotors() {
   int ma1 = 0, ma2 = 0;
   int mb1 = 0, mb2 = 0;
   
-  float scaledPwmMagnitudeA = gPwmDutyAppliedMagnitude * (1 << (PWM_PRECISION-8));
+  float scaledPwmMagnitudeA = gPwmDutyAppliedMagnitude * PWM_SCALE_FROM_8BIT;
   float scaledPwmMagnitudeB = scaledPwmMagnitudeA;
   float effectiveYaw = gYawTrim + gSteeringBias;
   // TODO: Allow each motor to be driven forward or backward independently
+  // TODO: Applying the yaw/steering here is inaccurate - we should be scaling within the pwm min/max, not on an absolute scale
   if (effectiveYaw > 0.0f) {
     scaledPwmMagnitudeB *= (1.0f - effectiveYaw);
   } else if(effectiveYaw < 0.0f) {
     scaledPwmMagnitudeA *= (1.0f + effectiveYaw);
   }
+  // Update gPwmDutyAppliedMagnitude to account for the steering tweak, allowing more accurate speed estimation and control
+  gPwmDutyAppliedMagnitude = (scaledPwmMagnitudeA + scaledPwmMagnitudeB) / (2 * PWM_SCALE_FROM_8BIT);
 
   int quantizedMagnitudeA = (int)std::round(scaledPwmMagnitudeA);
   int quantizedMagnitudeB = (int)std::round(scaledPwmMagnitudeB);
