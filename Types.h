@@ -27,13 +27,19 @@ enum eConfigMode {
   eVelocityPidKi,
   eVelocityPidKd,
   eVelocityDIIRWeight,
+  eVelocityCurSpeedIIRWeight, // gSpeedIIRWeight
+
+  eMaxThrottle,
 
   eMotorSmoothing,
   eDeadzone,
   eHBridgeIdle,
   eFusionKp,
   eFusionKi,
+  eInvertVelocityPid,
   eIMUDisplay,
+  eReset,
+  eBattery,
   eMaxConfigMode,
   eDefaultConfigMode = ePitchTrim
 };

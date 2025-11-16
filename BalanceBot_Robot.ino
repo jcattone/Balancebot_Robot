@@ -68,7 +68,7 @@ const int g_update_period = 1000 / g_update_freq;
 // In practice, I'm seeing eyeball-reasonable results with Kp=10..25, and Ki=0..5
 //   (10.0 & 3.0 seems fastish and low noise)
 //   (32/2 seems snappy)
-Adafruit_Mahony filter(16.6f, 0.3f);  // ...(float prop_gain, float int_gain) // Kp, Ki
+Adafruit_Mahony filter(6.9f, 0.3f);  // ...(float prop_gain, float int_gain) // Kp (was 16-ish), Ki
 
 // The IMU instance itself
 Adafruit_MPU6050 mpu;
@@ -89,7 +89,7 @@ char textBuffer[SCREEN_HEIGHT_ROWS][SCREEN_CHAR_WIDTH + 1];  // the +1 is for a 
 
 eConfigMode gCurrentConfigMode = eDefaultConfigMode;
 
-
+#define BATTERY_SENSE_PIN 36
 
 #define MOTORA_PIN_1 25
 #define MOTORA_PIN_2 26
@@ -97,7 +97,7 @@ eConfigMode gCurrentConfigMode = eDefaultConfigMode;
 #define MOTORB_PIN_2 33
 const int PWM_PRECISION = 12;
 const int PWM_MAX = ((1 << PWM_PRECISION) - 1);
-const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION-8));
+const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 
 #define LED_PIN 2
 
@@ -117,6 +117,7 @@ const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION-8));
 // TODO: Partially attenuate Angle PID Kp based on angle max IIR, allowing response
 //       to become more subtle near balance, but immediately ramp up for correction.
 //       Maybe other params are adaptive as well?
+// TODO: Auto-tune pitch trim - observe average power when gSpeedBias == 0, slowly adjust gPitchTrim to bring the averaged gPwmDutyAccumulator closer to 0
 
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
 // The following three are floats (instead of int) to avoid runtime conversion
@@ -136,20 +137,33 @@ float gYawTrim = 0.0f;
 
 float gSpeedBias = 0.0f;
 float gSteeringBias = 0.0f;
+float gMaxThrottleBias = 1.0f;
+
+
+float gVoltage = 0.0f;
+float gVoltagePercent = 0.0f;
 
 // Or 0.16 - 0.24 seems to work well with Kd=~0.06-0.07
 // Lower values help with smooth stability at low deflection, but don't respond quickly enough to correct for nudges
-float gPitchPidKp = 0.30f;  
+
+// Originally: pitch 0.3/0/0.05 (IIR .16), vel 0.14/0/0 (IIR .8) w/ intrinsic 60x
+//
+// Alt: Kp 6.9/0.3, v0.86/0/0.3, P_IIR 0.5, v8.0,0,0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908, 
+//   Weak balance, somewhat jittery
+float gPitchPidKp = 0.86f;
 float gPitchPidKi = 0.0f;
-float gPitchPidKd = 0.05f;
+float gPitchPidKd = 0.03f;
 
-float gMotorFilter = 0.684f;
-float gDIIRWeight = 0.16f;
+float gDIIRWeight = 0.5f;
 
-float gVelocityDIIRWeight = 0.80f;
-float gVelocityPidKp = 0.14f;
+float gSpeedIIRWeight = 0.010;
+float gVelocityPidKp = 8.0f;
 float gVelocityPidKi = 0.0f;
 float gVelocityPidKd = 0.0f;
+float gVelocityDIIRWeight = 0.50f;
+bool gInvertVelocityPid = true;
+
+float gMotorFilter = 0.908f;
 
 // esp_now_send_cb_t
 void OnDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t send_status) {
@@ -176,9 +190,9 @@ bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len) {
       // Loopback status from the local remote instance... not from the controller.
       memcpy(textBuffer[1], data, data_len);
       textBuffer[1][data_len] = 0;
-      #ifdef SERIAL_DIAG
+#ifdef SERIAL_DIAG
       Serial.println((const char*)data);
-      #endif
+#endif
       break;
 
     case MSGTYPE_RMT_JOYSTICK:
@@ -215,6 +229,8 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
+  pinMode(BATTERY_SENSE_PIN, INPUT);
+
   // TODO: initMotors()
   pinMode(MOTORA_PIN_1, OUTPUT);
   pinMode(MOTORA_PIN_2, OUTPUT);
@@ -226,7 +242,7 @@ void setup() {
   analogWriteFrequency(MOTORB_PIN_1, gPwmFreq);
   analogWriteFrequency(MOTORB_PIN_2, gPwmFreq);
 
-  analogWriteResolution(MOTORA_PIN_1, PWM_PRECISION); // scale all pwm output by 2^4 (16)
+  analogWriteResolution(MOTORA_PIN_1, PWM_PRECISION);  // scale all pwm output by 2^4 (16)
   analogWriteResolution(MOTORA_PIN_2, PWM_PRECISION);
   analogWriteResolution(MOTORB_PIN_1, PWM_PRECISION);
   analogWriteResolution(MOTORB_PIN_2, PWM_PRECISION);
@@ -259,9 +275,23 @@ void loop() {
 
   handleInput();
   updateOrientation();
+  updateBattery();
   updateDisplay();
   updateRemoteDisplay();
   updateMotors();
+}
+
+void updateBattery() {
+  unsigned long now = millis();
+  static unsigned long lastSense = 0;
+  if (now - lastSense > 1000) {
+    lastSense = now;
+    uint16_t battery = analogRead(BATTERY_SENSE_PIN);
+    gVoltage = 3.78f * (3.3f * (float)battery / 4095.0f);
+    const float lowLevel = 2 * 3.4f;
+    const float highLevel = 2 * 4.2f;
+    gVoltagePercent = max(0.0f, (gVoltage - lowLevel) / (highLevel - lowLevel) * 100.0f);
+  }
 }
 
 // TODO: position or velocity pid control via angle setpoint guidance
@@ -273,7 +303,15 @@ void loop() {
 // Position: this requires integration of motor output over time, or
 // even the use of a position encoder.
 
+// TODO: Switch the motor polarity to better match the intuitive drive direction? Also update the comments...
 // Given a desired angle, guide acceleration.
+//
+// The sign of accelOut matches that of the current pitch /error/
+// (i.e., if currentAngle > desiredAngle, the accel is positive)
+// thus, from a point of stability, increasing desiredAngle (a + change) will result in a (-) accel.
+// That corresponds to the base (wheels) moving backwards to achieve a forward tilt.
+// Once the current angle exceeds the desired angle (), the accel switches direction,
+// seeking to drive the wheels to chase the body.
 bool pitchPidUpdate(float desiredAngle, float deltaTSec, float& accelOut) {
   // TODO: Map accel based on angle, knowing that small angles need
   // very little correction, but high angles need super-linear adjustment.
@@ -367,51 +405,93 @@ bool pitchPidUpdate(float desiredAngle, float deltaTSec, float& accelOut) {
   return pitchPidFault;
 }
 
-
+// TODO: I don't think this is doing quite what we want...
+// The Velocity error is scaling P between 0 and Kp.
+// desiredSpeedNormalized is merely scaling that between +/-1.0xP
+// Keep in mind that the velocity control is normally a negative feedback, trying to
+// couteract runaway / persistent velocity.
+// We want the desired speed to be able to swing the pitch across the neutral point, and significantly so.
+// The challenge is that we want rapid throttle feedback, but a more gradual counter to long-term speed.
+// Can the D term help here?  Throttle would produce a rapid delta (though one that disappers rapidly)
+// TODO: Remove the serial output.
 // Given a desired speed, guide the pitch.
+// If we need to speed up, lean into the appropriate direction
+// If we need to slow down, lean away from the direction of travel
 bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget) {
   // We could look at gPwmDutyAccumulator directly, but we can disregard
   // the deadzone and power scaling by deriving an effective velocity
   // from the applied magnitude relative to the scaled power range.
   // Constrain values lower than gPwmMinDuty to be equivalent to 0.
-  // TODO: This doesn't account for steering, which attenuates one motor.
-  // as a result, when steering is applied, the current velocity is overestimated.
+  // gPwmDutyAppliedMagnitude is pre-adjusted to account for the net impact of steering.
   float currentVelocityNormalized = max(0.0f, (gPwmDutyAppliedMagnitude - gPwmMinDuty) / (gPwmMaxDuty - gPwmMinDuty));
+
+  // Check for out-of-bounds velocity (shouldn't happen?)
   bool velocityPidFault = currentVelocityNormalized < -0.01f || currentVelocityNormalized > 1.01f;
+
+  // Account for the current direction of travel
   if (gPwmDutyAccumulator < 0.0f)
     currentVelocityNormalized *= -1.0f;
 
+  // Smooth the current velocity
+  static float smoothedVelocityNormalized = 0.0f;
+  smoothedVelocityNormalized = gSpeedIIRWeight * currentVelocityNormalized + (1.0f - gSpeedIIRWeight) * smoothedVelocityNormalized;
 
-  // -----------------------------
-  // Velocity-driven PID
-  float errorVelocity = currentVelocityNormalized - desiredSpeedNormalized;
-  float P = errorVelocity;
+  // The subsequent pitch controller produces accel matching the sign of the current pitch /error/ (opposite to control changes)
+  // At this point, a currentVelocityNormalized > 0 is travelling in the same direction as a positive pitch would produce.
+  // To counteract drift, we would want to target a pitch opposite in sign of currentVelocityNormalized.
+  // So, with a velocity target of 0 and a positive currentVelocityNormalized, the error is positive, so we want a
+  // negative (inverted) pitch output, which produces positive accel (wheels passing the body) to result in the
+  // desired negative pitch, which will require a reversal in direction to maintain.
 
+  // Calculate current error from target
+  // This has an absolute magnitude cap of 2.0
+  // Note that this compares the time-averaged velocity to the instantaneous target
+  float velocityErrorNormalized = smoothedVelocityNormalized - desiredSpeedNormalized;
+
+  // Proportional feedback
+  float P = velocityErrorNormalized;
+
+  // Integral feedback
   static float errorIntegral = 0.0;
+
   // Clear the integral when crossing the setpoint.
   static int lastErrorSign = 0;
-  int currentErrorSign = std::signbit(errorVelocity);
+  int currentErrorSign = std::signbit(velocityErrorNormalized);
   if (currentErrorSign != lastErrorSign)
     errorIntegral = 0;
   lastErrorSign = currentErrorSign;
 
-  // Only accumulate error when we aren't saturated or stationary
+  // Only integrate error when we aren't saturated or stationary
+  // This uses the instantaneous (non-smoothed) velocity to ensure we're
+  // able to detect saturation without lag.
   float curVelMag = std::abs(currentVelocityNormalized);
   if (curVelMag > 0.01f && curVelMag < 0.99f) {
-    errorIntegral += errorVelocity * deltaTSec;
+    // velocityErrorNormalized is unitless, measuring the raw delta between normalized current and target velocity.
+    // The normalized velocity ranges across [-1.0, 1.0], and we want integration to be reasonably
+    // agnostic to the update period.  So... we scale the velocity error by deltaT so that we're
+    // integrating one velocityErrorNormalized per second.
+    errorIntegral += velocityErrorNormalized * deltaTSec;
   }
 
+  // Any scaling applied to the integral would just a scalar adjustment to Ki, so we'll avoid any further
+  // scaling of the integrated error.
   float I = errorIntegral;
 
+  // Derivative feedback
   static float lastErrorVelocity = 0.0f;
   static float errorDeltaPerSecondIIR = 0.0f;
-  float errorDeltaPerSecond = (errorVelocity - lastErrorVelocity) / deltaTSec;
-  // IIR; weight the accumulator heavily, and the new value lightly.
+  float errorDeltaPerSecond = (velocityErrorNormalized - lastErrorVelocity) / deltaTSec;
+  // IIR; Smooth the delta over multiple readings
   errorDeltaPerSecondIIR = gVelocityDIIRWeight * errorDeltaPerSecond + (1.0f - gVelocityDIIRWeight) * errorDeltaPerSecondIIR;
-  lastErrorVelocity = errorVelocity;
+  lastErrorVelocity = velocityErrorNormalized;
   float D = errorDeltaPerSecondIIR;
 
-  pitchTarget = -60 * (gVelocityPidKp * P + gVelocityPidKi * I + gVelocityPidKd * D);
+  pitchTarget = (gVelocityPidKp * P + gVelocityPidKi * I + gVelocityPidKd * D);
+  if (gInvertVelocityPid)
+    pitchTarget = -pitchTarget;
+#ifdef SERIAL_DIAG
+  Serial.printf("SpeedBias:%.2f,PitchTgt:%.3f\n", desiredSpeedNormalized, pitchTarget);
+#endif
   return velocityPidFault;
 }
 
@@ -430,20 +510,11 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
 // short while (or just have a supression metric driven by non-zero)
 // PID accel output.
 //
-// Also, the IMU seems to be physically skewed - we might want to
-// configure a pitch trim, so that we can zero out the pitch.
-//
 // The motor response also seems to aggressive, ramping rapidly to
 // full power.  Not only does this cause wheel slippage, but it makes
 // small-scale balance very difficult.  Look into better low-range
 // control, possibly remapping the accel data?
 //
-// Very small-scale pitch values may result in accel data so small as
-// to fall under the quantization threshold.  Report & accumulate
-// accel as a float?
-//
-// The velicity setpoint adjustment seems inverted in feedback direction
-// (this has been addressed by negating velocityPidUpdate's setpoint output)
 void updateMotors() {
   static int startupPwmAttenuation = 0;
 
@@ -453,20 +524,19 @@ void updateMotors() {
   // ----------------------------------------
   // Throttle
   static unsigned long lastUpdate = 0;
-  unsigned long now = millis();
-  if (now - lastUpdate < g_update_period)
+  unsigned long nowMs = millis();
+  if (nowMs - lastUpdate < g_update_period)
     return;
-  lastUpdate = now;
+  lastUpdate = nowMs;
 
   // ---------------------------------------
   // Inter-sample time scaling
 
   // Calculate dT in seconds (the actual time unit is arbitrary, as long as we're consistent)
-  // TODO: Is the above true?
-  static unsigned long lastSampleTime = 0;
+  static unsigned long lastSampleTimeMs = 0;
   static bool isFirstSample = true;
-  float deltaTSec = static_cast<float>(now - lastSampleTime) / 1000.0f;
-  lastSampleTime = now;
+  float deltaTSec = static_cast<float>(nowMs - lastSampleTimeMs) / 1000.0f;
+  lastSampleTimeMs = nowMs;
   // The first sample is used only to set the sample time, so that
   // the next sample (the first real one) can be evaluated with an
   // accurate inter-sample deltaT.
@@ -477,9 +547,15 @@ void updateMotors() {
 
   // --------------------------------------
   // Pitch-driven PID
-  float desiredSpeedNormalized = gSpeedBias * 0.5; // The throttle must leave enough headroom to permit balance correction
+  // The desired speed is calculated as a normalized (relative)
+  // fraction of maximum duty cycle, e.g., [-1.0, 1.0]
+  // Limit the throttle's impact to leave headroom for balance correction via further acceleration,
+  // and to avoid throwing the robot helplessly out of balance via a rapid throttle change.
+  // In practice,
+  float desiredSpeedNormalized = gSpeedBias * gMaxThrottleBias;
   float desiredAngle;
   bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredAngle);
+
   desiredAngle += gPitchTrim;
   float pidAccelOut;
   bool pitchPidFault = pitchPidUpdate(desiredAngle, deltaTSec, pidAccelOut);
@@ -534,11 +610,11 @@ void updateMotors() {
       Serial.println("Velocity Fault!");
     else
       Serial.println("Pitch Fault!");
-    pidFaultTimeMs = now;
+    pidFaultTimeMs = nowMs;
   }
 
   static bool faultLedState = false;
-  if (pidFault && (now - pidFaultTimeMs) > 100) {
+  if (pidFault && (nowMs - pidFaultTimeMs) > 100) {
     // In case we're experimenting without the motor enabled,
     // the onboard LED is used as a fault indicator.  The
     // transition is placed here (instead of above) to ensure
@@ -571,15 +647,15 @@ void updateMotors() {
   bool m1Driven;
   int ma1 = 0, ma2 = 0;
   int mb1 = 0, mb2 = 0;
-  
+
   float scaledPwmMagnitudeA = gPwmDutyAppliedMagnitude * PWM_SCALE_FROM_8BIT;
   float scaledPwmMagnitudeB = scaledPwmMagnitudeA;
-  float effectiveYaw = gYawTrim + gSteeringBias;
+  float effectiveYaw = gYawTrim + gSteeringBias * 0.6;
   // TODO: Allow each motor to be driven forward or backward independently
   // TODO: Applying the yaw/steering here is inaccurate - we should be scaling within the pwm min/max, not on an absolute scale
   if (effectiveYaw > 0.0f) {
     scaledPwmMagnitudeB *= (1.0f - effectiveYaw);
-  } else if(effectiveYaw < 0.0f) {
+  } else if (effectiveYaw < 0.0f) {
     scaledPwmMagnitudeA *= (1.0f + effectiveYaw);
   }
   // Update gPwmDutyAppliedMagnitude to account for the steering tweak, allowing more accurate speed estimation and control
@@ -674,14 +750,12 @@ void handleInput() {
   last_hid_message_processed = last_hid_input_timestamp;
 
   // Process joystick events if there's an unprocessed count.
-  if(g_last_message_type == MSGTYPE_RMT_JOYSTICK_ANALOG) {
-    // TODO: Steering requires some pitch, or to pivot in place...
+  if (g_last_message_type == MSGTYPE_RMT_JOYSTICK_ANALOG) {
     // -1.0 .. +1.0
-    gSteeringBias = g_joystick_analog_state.x_axis * 0.6;
+    gSteeringBias = g_joystick_analog_state.x_axis;
     // Remap to +/- 20 degrees
-    gSpeedBias = g_joystick_analog_state.y_axis * 3.0f;
-  }
-  else if (g_last_message_type == MSGTYPE_RMT_JOYSTICK && g_joystick_state.count > 0) {
+    gSpeedBias = g_joystick_analog_state.y_axis;
+  } else if (g_last_message_type == MSGTYPE_RMT_JOYSTICK && g_joystick_state.count > 0) {
     // Extract the joystick state
     bool up = (g_joystick_state.joystick_direction & JOYSTICK_UP) != 0;
     bool down = (g_joystick_state.joystick_direction & JOYSTICK_DOWN) != 0;
@@ -733,12 +807,12 @@ void handleInput() {
           gPitchTrim = max(-10.0f, gPitchTrim - 0.1f * count);
         break;
       case ePwmMin:
-        if (right) gPwmMinDuty = min(gPwmMaxDuty, gPwmMinDuty + (float) count);
-        else if (left) gPwmMinDuty = max(0.0f, gPwmMinDuty - (float) count);
+        if (right) gPwmMinDuty = min(gPwmMaxDuty, gPwmMinDuty + (float)count);
+        else if (left) gPwmMinDuty = max(0.0f, gPwmMinDuty - (float)count);
         break;
       case ePwmMax:
-        if (right) gPwmMaxDuty = min(255.0f, gPwmMaxDuty + (float) count);
-        else if (left) gPwmMaxDuty = max(gPwmMinDuty, gPwmMaxDuty - (float) count);
+        if (right) gPwmMaxDuty = min(255.0f, gPwmMaxDuty + (float)count);
+        else if (left) gPwmMaxDuty = max(gPwmMinDuty, gPwmMaxDuty - (float)count);
         break;
       case ePwmFreq:
         {
@@ -773,11 +847,23 @@ void handleInput() {
         else if (left)
           gVelocityDIIRWeight = max(0.0f, gVelocityDIIRWeight - 0.01f * count);
         break;
+      case eVelocityCurSpeedIIRWeight:
+        if (right)
+          gSpeedIIRWeight = min(1.0f, gSpeedIIRWeight + 0.001f * count);
+        else if (left)
+          gSpeedIIRWeight = max(0.0f, gSpeedIIRWeight - 0.001f * count);
+        break;
+      case eMaxThrottle:
+        if (right)
+          gMaxThrottleBias = min(1.0f, gMaxThrottleBias + 0.01f * count);
+        else if (left)
+          gMaxThrottleBias = max(0.0f, gMaxThrottleBias - 0.01f * count);
+        break;
       case eDeadzone:
         if (right)
-          gDeadZone = min(255.0f, gDeadZone + (float) count);
+          gDeadZone = min(255.0f, gDeadZone + (float)count);
         else if (left)
-          gDeadZone = max(0.0f, gDeadZone - (float) count);
+          gDeadZone = max(0.0f, gDeadZone - (float)count);
         break;
       case eHBridgeIdle:
         if (right)
@@ -802,6 +888,36 @@ void handleInput() {
         break;
       case eVelocityPidKd:
         adjustPidK(&gVelocityPidKd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        break;
+      case eInvertVelocityPid:
+        if (right)
+          gInvertVelocityPid = true;
+        else if (left)
+          gInvertVelocityPid = false;
+        break;
+      case eReset:
+        if (count > 5) {
+          gHBridgeIdleMode = eBraking;
+          gDeadZone = 1;
+          gPwmMinDuty = 23;
+          gPwmMaxDuty = 200;
+          gPwmDutyAccumulator = 0.0f;
+          gPwmDutyAppliedMagnitude = 0.0f;
+          gPwmFreq = 2 * g_update_freq;
+          gPitchTrim = -2.6f;
+          gYawTrim = 0.0f;
+          gSpeedBias = 0.0f;
+          gSteeringBias = 0.0f;
+          gPitchPidKp = 0.0f;
+          gPitchPidKi = 0.0f;
+          gPitchPidKd = 0.0f;
+          gMotorFilter = 1.0f;
+          gDIIRWeight = 1.0f;
+          gVelocityDIIRWeight = 1.0f;
+          gVelocityPidKp = 0.0f;
+          gVelocityPidKi = 0.0f;
+          gVelocityPidKd = 0.0f;
+        }
         break;
       case eIMUDisplay:
       default:
@@ -857,6 +973,9 @@ void updateRemoteDisplay() {
 
   char detailString[SCREEN_CHAR_WIDTH + 1];
   switch (gCurrentConfigMode) {
+    case eReset:
+      snprintf(detailString, sizeof(detailString), "Reset (hold)");
+      break;
     case eIMUDisplay:
       snprintf(detailString, sizeof(detailString), "IMU: R%+04.1f P%+04.1f", gOrientation.roll, gOrientation.pitch);
       break;
@@ -887,6 +1006,12 @@ void updateRemoteDisplay() {
     case eVelocityDIIRWeight:
       snprintf(detailString, sizeof(detailString), "V_IIR: %.2f", gVelocityDIIRWeight);
       break;
+    case eVelocityCurSpeedIIRWeight:
+      snprintf(detailString, sizeof(detailString), "SP_IIR: %.3f", gSpeedIIRWeight);
+      break;
+    case eMaxThrottle:
+      snprintf(detailString, sizeof(detailString), "Throttle: %.0f%%", gMaxThrottleBias * 100.0f);
+      break;
     case eDeadzone:
       snprintf(detailString, sizeof(detailString), "mDead: %.0f", gDeadZone);
       break;
@@ -913,6 +1038,15 @@ void updateRemoteDisplay() {
       break;
     case eVelocityPidKd:
       snprintf(detailString, sizeof(detailString), "vPID %.2f %.2f *%.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
+      break;
+    case eInvertVelocityPid:
+      if (gInvertVelocityPid)
+        snprintf(detailString, sizeof(detailString), "-VelPID= N  / [Y]");
+      else
+        snprintf(detailString, sizeof(detailString), "-VelPID=[N] /  Y ");
+      break;
+    case eBattery:
+      snprintf(detailString, sizeof(detailString), "Batt: %.2f (%.0f%%)", gVoltage, gVoltagePercent);
       break;
   }
 
