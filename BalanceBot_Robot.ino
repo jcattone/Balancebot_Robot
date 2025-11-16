@@ -157,7 +157,7 @@ float gPitchPidKd = 0.03f;
 float gDIIRWeight = 0.5f;
 
 float gSpeedIIRWeight = 0.010;
-float gVelocityPidKp = 8.0f;
+float gVelocityPidKp = 6.0f;
 float gVelocityPidKi = 0.0f;
 float gVelocityPidKd = 0.0f;
 float gVelocityDIIRWeight = 0.50f;
