@@ -68,7 +68,7 @@ const int g_update_period = 1000 / g_update_freq;
 // In practice, I'm seeing eyeball-reasonable results with Kp=10..25, and Ki=0..5
 //   (10.0 & 3.0 seems fastish and low noise)
 //   (32/2 seems snappy)
-Adafruit_Mahony filter(6.9f, 0.3f);  // ...(float prop_gain, float int_gain) // Kp (was 16-ish), Ki
+Adafruit_Mahony filter(3.7f, 0.3f);  // ...(float prop_gain, float int_gain) // Kp (was 16-ish), Ki
 
 // The IMU instance itself
 Adafruit_MPU6050 mpu;
@@ -119,10 +119,11 @@ const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 //       Maybe other params are adaptive as well?
 // TODO: Auto-tune pitch trim - observe average power when gSpeedBias == 0, slowly adjust gPitchTrim to bring the averaged gPwmDutyAccumulator closer to 0
 
-// Alt: pwmFreq: 400, Kp 6.9/0.3, v0.86/0/0.3, P_IIR 0.5, v8.0,0,0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
+// Alt: pwmFreq: 400, Kp 6.9/0.3, p0.86/0/0.3, P_IIR 0.5, v8.0,0,0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
 //   Weak balance, somewhat jittery
-// Alt: pwmFreq: 16k, Kp 3.7/0.3, v0.46/0/0.04, P_IIR: 0.5, v6/0/0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
+// Alt: pwmFreq: 16k, Kp 3.7/0.3, p0.46/0/0.04, P_IIR: 0.5, v6/0/0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
 //   Seems a resilient (if rubberbandy) balance, driveable, somewhat resistant to sudden wheel blockage 
+//   pKd=0.07, P_IIR=1.0 seems to reduce jitter and be just enough responsive to moderate disturbances
 
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
 // The following three are floats (instead of int) to avoid runtime conversion
@@ -133,7 +134,7 @@ float gPwmMaxDuty = 200;                // 160 is nominal ((2 * 4.2) - 0.7) * (1
                                         // but a bit more oomph helps recovery
 float gPwmDutyAccumulator = 0.0f;       // The raw PWM target
 float gPwmDutyAppliedMagnitude = 0.0f;  // gPwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
-int gPwmFreq = 2 * g_update_freq;       // Default ensures that updates are applied in less than one update cycle
+int gPwmFreq = 16000;
 float gPitchTrim = -2.6f;               // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
 
 // The fraction shifted from one motor to the other
@@ -152,11 +153,11 @@ float gVoltagePercent = 0.0f;
 // Lower values help with smooth stability at low deflection, but don't respond quickly enough to correct for nudges
 
 // Originally: pitch 0.3/0/0.05 (IIR .16), vel 0.14/0/0 (IIR .8) w/ intrinsic 60x
-float gPitchPidKp = 0.86f;
+float gPitchPidKp = 0.46f;
 float gPitchPidKi = 0.0f;
-float gPitchPidKd = 0.03f;
+float gPitchPidKd = 0.04f;
 
-float gDIIRWeight = 0.5f;
+float gDIIRWeight = 1.0f;
 
 float gSpeedIIRWeight = 0.010;
 float gVelocityPidKp = 6.0f;
@@ -296,9 +297,9 @@ void updateBattery() {
     // due to the motors' current draw.
     // Note that the capacitor will hold a charge for quite a while after removal of the
     // primary power source.
-    if (currentVoltate < 1.0f)
+    if (currentVoltage < 1.0f)
       voltageIIR = 0.0f;
-    else if (voltageIIR < 0.0f)
+    else if (voltageIIR <= 0.0f)
       voltageIIR = currentVoltage;
     else
       voltageIIR = 0.001 * currentVoltage + 0.999 * voltageIIR;
