@@ -119,6 +119,11 @@ const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 //       Maybe other params are adaptive as well?
 // TODO: Auto-tune pitch trim - observe average power when gSpeedBias == 0, slowly adjust gPitchTrim to bring the averaged gPwmDutyAccumulator closer to 0
 
+// Alt: pwmFreq: 400, Kp 6.9/0.3, v0.86/0/0.3, P_IIR 0.5, v8.0,0,0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
+//   Weak balance, somewhat jittery
+// Alt: pwmFreq: 16k, Kp 3.7/0.3, v0.46/0/0.04, P_IIR: 0.5, v6/0/0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
+//   Seems a resilient (if rubberbandy) balance, driveable, somewhat resistant to sudden wheel blockage 
+
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
 // The following three are floats (instead of int) to avoid runtime conversion
 // to float when comparing to gPwmDutyAccumulator / gPwmDutyAppliedMagnitude
@@ -147,9 +152,6 @@ float gVoltagePercent = 0.0f;
 // Lower values help with smooth stability at low deflection, but don't respond quickly enough to correct for nudges
 
 // Originally: pitch 0.3/0/0.05 (IIR .16), vel 0.14/0/0 (IIR .8) w/ intrinsic 60x
-//
-// Alt: Kp 6.9/0.3, v0.86/0/0.3, P_IIR 0.5, v8.0,0,0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908, 
-//   Weak balance, somewhat jittery
 float gPitchPidKp = 0.86f;
 float gPitchPidKi = 0.0f;
 float gPitchPidKd = 0.03f;
@@ -284,10 +286,23 @@ void loop() {
 void updateBattery() {
   unsigned long now = millis();
   static unsigned long lastSense = 0;
+  static float voltageIIR = 0.0f;
   if (now - lastSense > 1000) {
     lastSense = now;
     uint16_t battery = analogRead(BATTERY_SENSE_PIN);
-    gVoltage = 3.78f * (3.3f * (float)battery / 4095.0f);
+    float currentVoltage = 3.78f * (3.3f * (float)battery / 4095.0f);
+
+    // Apply heavy time-averaging to the voltage, which will appear to swing significantly
+    // due to the motors' current draw.
+    // Note that the capacitor will hold a charge for quite a while after removal of the
+    // primary power source.
+    if (currentVoltate < 1.0f)
+      voltageIIR = 0.0f;
+    else if (voltageIIR < 0.0f)
+      voltageIIR = currentVoltage;
+    else
+      voltageIIR = 0.001 * currentVoltage + 0.999 * voltageIIR;
+    gVoltage = voltageIIR;
     const float lowLevel = 2 * 3.4f;
     const float highLevel = 2 * 4.2f;
     gVoltagePercent = max(0.0f, (gVoltage - lowLevel) / (highLevel - lowLevel) * 100.0f);
