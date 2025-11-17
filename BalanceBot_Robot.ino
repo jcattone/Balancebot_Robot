@@ -124,6 +124,11 @@ const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 // Alt: pwmFreq: 16k, Kp 3.7/0.3, p0.46/0/0.04, P_IIR: 0.5, v6/0/0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
 //   Seems a resilient (if rubberbandy) balance, driveable, somewhat resistant to sudden wheel blockage 
 //   pKd=0.07, P_IIR=1.0 seems to reduce jitter and be just enough responsive to moderate disturbances
+//   Learning... overly aggressive Mahony Kp was at the heart of much of the jitter and instability.
+//   D-smoothing (gDIIRWeight) further caused D to lag.  This might have produced a phase offset (lag) 
+//     that resulted in oscillation / orbiting in the state-space?
+//   While keeping target speeds to < 5V average for the motors' benefit, we can use brief bursts up to full 
+//     supply voltage (~8.4V) for emergency correction. However, that should be limited to prevent motor damage.
 
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
 // The following three are floats (instead of int) to avoid runtime conversion
@@ -591,6 +596,14 @@ void updateMotors() {
   // Adjust the speed by the desired relative acceleration, constraining the duty cycle to the PWM limits.
   // Note that this can be negative, to indicate a reversed direction.
   // TODO: Permit brief excusions beyond gPwmMaxDuty (up to 255) for recovery, but trigger 'unsafe' if operating beyond saturation for more than briefly?)
+  //   Split gPwmMaxDuty into soft & hard limits (default to 255?)
+  //   Maintain a 'cap' reservoir
+  //   Regenerate toward hard max + delay when target is less than soft max
+  //     don't just reset - need to provide time for the motor to cool down
+  //     delay scale is based on update frequency, decay mode, and permitted time-at-max (should be small)
+  //   constrain to cap, reduce cap (decrement or decay) if > soft max
+  // TODO: Encapsulate the above, and perform it independently for each motor!
+  // TODO: Physical limit switches to pull DVR8833 SLEEP low if laying down (in addition to the manual switch)
   gPwmDutyAccumulator = constrain(gPwmDutyAccumulator + constrainedAccel, -gPwmMaxDuty, gPwmMaxDuty);
 
   // Optional filter
