@@ -68,7 +68,24 @@ const int g_update_period = 1000 / g_update_freq;
 // In practice, I'm seeing eyeball-reasonable results with Kp=10..25, and Ki=0..5
 //   (10.0 & 3.0 seems fastish and low noise)
 //   (32/2 seems snappy)
-Adafruit_Mahony filter(3.7f, 0.3f);  // ...(float prop_gain, float int_gain) // Kp (was 16-ish), Ki
+// Theory-to-practice...
+//   The jumpiness was indeed exacerbated by a high IMU Kp, presumably
+//   by allowing large pitch deltas due to linear acceleration.
+//   By reducing Kp, we work more from the integrated gyro
+//   (i.e., integrated rotation delta), rather than from the
+//   accel (gravity) data, which is perturbed by linear motion.
+//   A small Ki weight still corrects integration error from the
+//   accel (gravity) vector.
+// TODO: Adjust Ki adaptively, decreasing the weight under acceleration,
+//   and increasing it when accel is steady (or just have a supression
+//   metric driven by non-zero PID accel output).
+float gMahonyKp = 3.7f;
+float gMahonyKi = 0.3f;
+#ifdef ADAPTIVE_FUSION_KI
+float gAccelPeakDecay = 0.990f;
+#endif
+float gMahonyKiScale = 1.0f;
+Adafruit_Mahony filter{};  // ...(float prop_gain, float int_gain) // Kp (was 16-ish), Ki
 
 // The IMU instance itself
 Adafruit_MPU6050 mpu;
@@ -118,16 +135,19 @@ const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 //       to become more subtle near balance, but immediately ramp up for correction.
 //       Maybe other params are adaptive as well?
 // TODO: Auto-tune pitch trim - observe average power when gSpeedBias == 0, slowly adjust gPitchTrim to bring the averaged gPwmDutyAccumulator closer to 0
+// TODO: Battery gauge: investigate BatterySense library, only sample when the motor is off, or at least not accelerating to a greater magnitude?
+// TODO: Set a battery fault if the voltage falls below a critical level
+// TODO: Use voltage sense to dynamically adjust the pwm range (at the least, the max), but use an IIR or when-motor-off sampling to avoid oscillation from motor draw
 
 // Alt: pwmFreq: 400, Kp 6.9/0.3, p0.86/0/0.3, P_IIR 0.5, v8.0,0,0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
 //   Weak balance, somewhat jittery
 // Alt: pwmFreq: 16k, Kp 3.7/0.3, p0.46/0/0.04, P_IIR: 0.5, v6/0/0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
-//   Seems a resilient (if rubberbandy) balance, driveable, somewhat resistant to sudden wheel blockage 
+//   Seems a resilient (if rubberbandy) balance, driveable, somewhat resistant to sudden wheel blockage
 //   pKd=0.07, P_IIR=1.0 seems to reduce jitter and be just enough responsive to moderate disturbances
 //   Learning... overly aggressive Mahony Kp was at the heart of much of the jitter and instability.
-//   D-smoothing (gDIIRWeight) further caused D to lag.  This might have produced a phase offset (lag) 
+//   D-smoothing (gDIIRWeight) further caused D to lag.  This might have produced a phase offset (lag)
 //     that resulted in oscillation / orbiting in the state-space?
-//   While keeping target speeds to < 5V average for the motors' benefit, we can use brief bursts up to full 
+//   While keeping target speeds to < 5V average for the motors' benefit, we can use brief bursts up to full
 //     supply voltage (~8.4V) for emergency correction. However, that should be limited to prevent motor damage.
 
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
@@ -140,7 +160,7 @@ float gPwmMaxDuty = 200;                // 160 is nominal ((2 * 4.2) - 0.7) * (1
 float gPwmDutyAccumulator = 0.0f;       // The raw PWM target
 float gPwmDutyAppliedMagnitude = 0.0f;  // gPwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
 int gPwmFreq = 16000;
-float gPitchTrim = -2.6f;               // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
+float gPitchTrim = -2.6f;  // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
 
 // The fraction shifted from one motor to the other
 // TODO: Implement PID control for this, driven by encoder input?
@@ -160,7 +180,7 @@ float gVoltagePercent = 0.0f;
 // Originally: pitch 0.3/0/0.05 (IIR .16), vel 0.14/0/0 (IIR .8) w/ intrinsic 60x
 float gPitchPidKp = 0.46f;
 float gPitchPidKi = 0.0f;
-float gPitchPidKd = 0.04f;
+float gPitchPidKd = 0.06f;
 
 float gDIIRWeight = 1.0f;
 
@@ -521,16 +541,6 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
 // rapid angle changes.  Slow the response by raising the center
 // of mass.
 //
-// The jumpiness might be exacerbated by a high IMU Kp, allowing
-// large pitch deltas due to linear acceleration.  By reducing Kp
-// (e.g., to very small levels), we work more from the integrated
-// gyro, rather than the accel data.  Just need to be cautious to
-// still correct from the accel (gravity) vector, but maybe do
-// that via an adaptive weight that enabled gravity correction
-// only when the motor has been at near-constant velocity for a
-// short while (or just have a supression metric driven by non-zero)
-// PID accel output.
-//
 // The motor response also seems to aggressive, ramping rapidly to
 // full power.  Not only does this cause wheel slippage, but it makes
 // small-scale balance very difficult.  Look into better low-range
@@ -578,20 +588,30 @@ void updateMotors() {
   bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredAngle);
 
   desiredAngle += gPitchTrim;
-  float pidAccelOut;
+  float pidAccelOut;  // -255..255 nominal
   bool pitchPidFault = pitchPidUpdate(desiredAngle, deltaTSec, pidAccelOut);
 
   // ----------------------------------
   // Convert PID guidance to normalized PWM duty cycle
 
   // Note that we want the acceleration (not speed) to be modulated by the PID output.
-  // TODO: Note that this is an integer, limiting fine-grained control especially close to 0
   float rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
 
   // Attenuate the PWM output on startup to prevent noisy output
   float constrainedAccel = constrain(rawAccel, (float)-startupPwmAttenuation, (float)startupPwmAttenuation);
   if (startupPwmAttenuation < 255)
     ++startupPwmAttenuation;
+
+#ifdef ADAPTIVE_FUSION_KI
+  // The rate at which the fusion filter corrects integrated gyro data from the gravity (accel) vector
+  // is inversely proportional to the time-weighted accel average.  That is, gravity correction is
+  // preferentially applied when not under the perturbing influence of linear acceleration (fwd/back).
+  // TODO: Account for steering's perturbing effects on applied accel (attenuating fwd/back accel,
+  // but increasing side-to-side accel).
+  static float normalizedAccelMagPeak = 0.0f;
+  normalizedAccelMagPeak = std::max(gAccelPeakDecay * normalizedAccelMagPeak, std::abs(constrainedAccel) / 255.0f);
+  gMahonyKiScale = 1.0f - normalizedAccelMagPeak;
+#endif
 
   // Adjust the speed by the desired relative acceleration, constraining the duty cycle to the PWM limits.
   // Note that this can be negative, to indicate a reversed direction.
@@ -822,13 +842,19 @@ void handleInput() {
     // Right/left apply a change to the current mode, scaled by the count when applicable.
     switch (gCurrentConfigMode) {
       case eFusionKp:
-        if (right) filter.setKp(min(100.0, filter.getKp() + 0.1 * count));
-        else if (left) filter.setKp(max(0.0, filter.getKp() - 0.1 * count));
+        if (right) gMahonyKp = min(100.0f, gMahonyKp + 0.1f * count);
+        else if (left) gMahonyKp = max(0.0f, gMahonyKp - 0.1f * count);
         break;
       case eFusionKi:
-        if (right) filter.setKi(min(100.0, filter.getKi() + 0.1 * count));
-        else if (left) filter.setKi(max(0.0, filter.getKi() - 0.1 * count));
+        if (right) gMahonyKi = min(100.0f, gMahonyKi + 0.01f * count);
+        else if (left) gMahonyKi = max(0.0f, gMahonyKi - 0.01f * count);
         break;
+#ifdef ADAPTIVE_FUSION_KI
+      case eAccelPeakDecay:
+        if (right) gAccelPeakDecay = min(1.0f, gAccelPeakDecay + 0.001f * count);
+        else if (left) gAccelPeakDecay = max(0.0f, gAccelPeakDecay - 0.001f * count);
+        break;
+#endif
       case ePitchTrim:
         if (right)
           gPitchTrim = min(10.0f, gPitchTrim + 0.1f * count);
@@ -1009,11 +1035,16 @@ void updateRemoteDisplay() {
       snprintf(detailString, sizeof(detailString), "IMU: R%+04.1f P%+04.1f", gOrientation.roll, gOrientation.pitch);
       break;
     case eFusionKp:
-      snprintf(detailString, sizeof(detailString), "Kp=*%.1f Ki=%.1f", filter.getKp(), filter.getKi());
+      snprintf(detailString, sizeof(detailString), "Kp=*%.1f Ki=%.2f", gMahonyKp, gMahonyKi);
       break;
     case eFusionKi:
-      snprintf(detailString, sizeof(detailString), "Kp=%.1f Ki=*%.1f", filter.getKp(), filter.getKi());
+      snprintf(detailString, sizeof(detailString), "Kp=%.1f Ki=*%.2f", gMahonyKp, gMahonyKi);
       break;
+#ifdef ADAPTIVE_FUSION_KI
+    case eAccelPeakDecay:
+      snprintf(detailString, sizeof(detailString), "KiDecay=*%.1f%%", gAccelPeakDecay * 100.0f);
+      break;
+#endif
     case ePwmMin:
       snprintf(detailString, sizeof(detailString), "pwm=*%.0f-%.0f (%.1f)", gPwmMinDuty, gPwmMaxDuty, gPwmDutyAccumulator);
       break;
@@ -1115,6 +1146,8 @@ void updateOrientation() {
   mpu.getEvent(&a, &g, &temp);
 
   // Update in degrees-per-second and gravities
+  filter.setKp(gMahonyKp);
+  filter.setKi(gMahonyKi * gMahonyKiScale);
   filter.update(
     // From radians-per-second to degrees-per-second
     g.gyro.x * 180.0f / M_PI,

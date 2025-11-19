@@ -36,6 +36,9 @@ enum eConfigMode {
   eHBridgeIdle,
   eFusionKp,
   eFusionKi,
+#ifdef ADAPTIVE_FUSION_KI
+  eAccelPeakDecay,
+#endif
   eInvertVelocityPid,
   eIMUDisplay,
   eReset,
