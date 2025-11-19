@@ -76,9 +76,6 @@ const int g_update_period = 1000 / g_update_freq;
 //   accel (gravity) data, which is perturbed by linear motion.
 //   A small Ki weight still corrects integration error from the
 //   accel (gravity) vector.
-// TODO: Adjust Ki adaptively, decreasing the weight under acceleration,
-//   and increasing it when accel is steady (or just have a supression
-//   metric driven by non-zero PID accel output).
 float gMahonyKp = 3.7f;
 float gMahonyKi = 0.3f;
 #ifdef ADAPTIVE_FUSION_KI
@@ -119,7 +116,6 @@ const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 #define LED_PIN 2
 
 // TODO: Motor gain/trim (i.e., adjust for differences in left/right speed or stiction-break)
-// TODO: Correction from bounce/bump is often excessive (insufficient compensation, or maybe needs to go above maxpwm briefly?)
 // TODO: Wheel encoders for feedback / auto-calibrate trim
 // TODO: Floor-proximity and collision sensors
 // TODO: Third-tier w/ additional sensors?
@@ -129,7 +125,6 @@ const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 // TODO: Allow a small anti-stiction reservoir (reset when the motor is turned off) to briefly (and mildly) boost the power when transitioning out of a full-stop
 // TODO: Sometimes locks up after a fall (motor stuck running, no further variation or remote response)
 //       (might have been related to a buffer overflow when writing to the remote display buffer)
-// TODO: Constrain pwm freq >= g_update_freq, and < 19k (if PWM_PRECISION = 12)
 // TODO: Separate params for coasting/braking modes
 // TODO: Partially attenuate Angle PID Kp based on angle max IIR, allowing response
 //       to become more subtle near balance, but immediately ramp up for correction.
@@ -259,35 +254,7 @@ void setup() {
 
   pinMode(BATTERY_SENSE_PIN, INPUT);
 
-  // TODO: initMotors()
-  pinMode(MOTORA_PIN_1, OUTPUT);
-  pinMode(MOTORA_PIN_2, OUTPUT);
-  pinMode(MOTORB_PIN_1, OUTPUT);
-  pinMode(MOTORB_PIN_2, OUTPUT);
-
-  analogWriteFrequency(MOTORA_PIN_1, gPwmFreq);
-  analogWriteFrequency(MOTORA_PIN_2, gPwmFreq);
-  analogWriteFrequency(MOTORB_PIN_1, gPwmFreq);
-  analogWriteFrequency(MOTORB_PIN_2, gPwmFreq);
-
-  analogWriteResolution(MOTORA_PIN_1, PWM_PRECISION);  // scale all pwm output by 2^4 (16)
-  analogWriteResolution(MOTORA_PIN_2, PWM_PRECISION);
-  analogWriteResolution(MOTORB_PIN_1, PWM_PRECISION);
-  analogWriteResolution(MOTORB_PIN_2, PWM_PRECISION);
-
-  // Initializing the motor pins uniformly solves the 'jerk on startup' problem
-  if (gHBridgeIdleMode == eBraking) {
-    analogWrite(MOTORA_PIN_1, 1);
-    analogWrite(MOTORA_PIN_2, 1);
-    analogWrite(MOTORB_PIN_1, 1);
-    analogWrite(MOTORB_PIN_2, 1);
-  } else {
-    analogWrite(MOTORA_PIN_1, 0);
-    analogWrite(MOTORA_PIN_2, 0);
-    analogWrite(MOTORB_PIN_1, 0);
-    analogWrite(MOTORB_PIN_2, 0);
-  }
-
+  initMotors();
   initDisplay();
   initImu();
 
@@ -332,6 +299,16 @@ void updateBattery() {
     const float lowLevel = 2 * 3.4f;
     const float highLevel = 2 * 4.2f;
     gVoltagePercent = max(0.0f, (gVoltage - lowLevel) / (highLevel - lowLevel) * 100.0f);
+
+#ifdef VCC_ADAPTIVE_MAX_PWM
+    // We can auto-adjust the max PWM duty to target a 5V average even as the
+    // battery voltage drops.  This does make manual max PWM duty adjustment moot.
+    // It also removes the ability to overdrive.  However, we could build in the
+    // 'boost reservoir' now...
+    if (gVoltage >= 5.0f) {
+      gPwmMaxDuty = (int)((5.0f / gVoltage) * 255.0f + 0.5f);
+    }
+#endif
   }
 }
 
@@ -639,7 +616,6 @@ void updateMotors() {
     gPwmDutyAppliedMagnitude = 0.0f;
   } else {
     // We're not in the dead zone; compress the output to eliminate the dead zone
-    // TODO: each of these coersced constraints can be changed to float as well?
     gPwmDutyAppliedMagnitude = map(std::abs(gPwmDutyAccumulator), gDeadZone, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
   }
 
@@ -699,13 +675,19 @@ void updateMotors() {
 
   float scaledPwmMagnitudeA = gPwmDutyAppliedMagnitude * PWM_SCALE_FROM_8BIT;
   float scaledPwmMagnitudeB = scaledPwmMagnitudeA;
+  
+  // Dampen the steering input to reserve some capacity in each motor for correction
   float effectiveYaw = gYawTrim + gSteeringBias * 0.6;
-  // TODO: Allow each motor to be driven forward or backward independently
-  // TODO: Applying the yaw/steering here is inaccurate - we should be scaling within the pwm min/max, not on an absolute scale
-  if (effectiveYaw > 0.0f) {
-    scaledPwmMagnitudeB *= (1.0f - effectiveYaw);
-  } else if (effectiveYaw < 0.0f) {
-    scaledPwmMagnitudeA *= (1.0f + effectiveYaw);
+
+  // Apply steering adjustments only when not faulted
+  if (!faultLedState) {
+    // TODO: Allow each motor to be driven forward or backward independently
+    // TODO: Applying the yaw/steering here is inaccurate - we should be scaling within the pwm min/max, not on an absolute scale
+    if (effectiveYaw > 0.0f) {
+      scaledPwmMagnitudeB *= (1.0f - effectiveYaw);
+    } else if (effectiveYaw < 0.0f) {
+      scaledPwmMagnitudeA *= (1.0f + effectiveYaw);
+    }
   }
   // Update gPwmDutyAppliedMagnitude to account for the steering tweak, allowing more accurate speed estimation and control
   gPwmDutyAppliedMagnitude = (scaledPwmMagnitudeA + scaledPwmMagnitudeB) / (2 * PWM_SCALE_FROM_8BIT);
@@ -747,6 +729,36 @@ void updateMotors() {
   analogWrite(MOTORA_PIN_2, ma2);
   analogWrite(MOTORB_PIN_1, mb1);
   analogWrite(MOTORB_PIN_2, mb2);
+}
+
+void initMotors() {
+  pinMode(MOTORA_PIN_1, OUTPUT);
+  pinMode(MOTORA_PIN_2, OUTPUT);
+  pinMode(MOTORB_PIN_1, OUTPUT);
+  pinMode(MOTORB_PIN_2, OUTPUT);
+
+  analogWriteFrequency(MOTORA_PIN_1, gPwmFreq);
+  analogWriteFrequency(MOTORA_PIN_2, gPwmFreq);
+  analogWriteFrequency(MOTORB_PIN_1, gPwmFreq);
+  analogWriteFrequency(MOTORB_PIN_2, gPwmFreq);
+
+  analogWriteResolution(MOTORA_PIN_1, PWM_PRECISION);  // scale all pwm output by 2^4 (16)
+  analogWriteResolution(MOTORA_PIN_2, PWM_PRECISION);
+  analogWriteResolution(MOTORB_PIN_1, PWM_PRECISION);
+  analogWriteResolution(MOTORB_PIN_2, PWM_PRECISION);
+
+  // Initializing the motor pins uniformly solves the 'jerk on startup' problem
+  if (gHBridgeIdleMode == eBraking) {
+    analogWrite(MOTORA_PIN_1, 1);
+    analogWrite(MOTORA_PIN_2, 1);
+    analogWrite(MOTORB_PIN_1, 1);
+    analogWrite(MOTORB_PIN_2, 1);
+  } else {
+    analogWrite(MOTORA_PIN_1, 0);
+    analogWrite(MOTORA_PIN_2, 0);
+    analogWrite(MOTORB_PIN_1, 0);
+    analogWrite(MOTORB_PIN_2, 0);
+  }
 }
 
 void initDisplay() {
@@ -872,7 +884,7 @@ void handleInput() {
       case ePwmFreq:
         {
           for (int i = 0; i < count; ++i) {
-            if (right) gPwmFreq = min(40000, max(gPwmFreq + 1, (int)(gPwmFreq * 1.1f)));
+            if (right) gPwmFreq = min(19000, max(gPwmFreq + 1, (int)(gPwmFreq * 1.1f)));
             else if (left) gPwmFreq = max(10, min(gPwmFreq - 1, (int)(gPwmFreq / 1.1f)));
           }
 
