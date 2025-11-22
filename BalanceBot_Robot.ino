@@ -7,8 +7,8 @@
 //   MPU-6050: I2C
 //     (optional) 22uF cap across power
 //   DRV8833
-//     Motor 1: Pins 25, 26
-//     Motor 2: Pins 32, 33
+//     Motor 1: Pins 32, 33
+//     Motor 2: Pins 25, 26
 //   10k pull-up resistors on both I2C lines
 //   1000uF cap on motor power
 //   0.1uF bypass cap on each motor power
@@ -51,11 +51,11 @@ joystick_analog_state_t g_joystick_analog_state = {};
 
 uint8_t g_last_message_type = MSGTYPE_UNKNOWN;
 
-const int g_sample_freq = 200;
-const int g_update_freq = 200;
+const int g_sample_freq = 200;  // Hz
+const int g_update_freq = 200;  // Hz
 
-const int g_sample_period = 1000 / g_sample_freq;
-const int g_update_period = 1000 / g_update_freq;
+const int g_sample_period = 1000 / g_sample_freq;  // ms
+const int g_update_period = 1000 / g_update_freq;  // ms
 
 // Initialize the IMU filter weights:
 // Kp ~= trust accel data (gravity vector) to correct gyro drift
@@ -105,10 +105,10 @@ eConfigMode gCurrentConfigMode = eDefaultConfigMode;
 
 #define BATTERY_SENSE_PIN 36
 
-#define MOTORA_PIN_1 25
-#define MOTORA_PIN_2 26
-#define MOTORB_PIN_1 32
-#define MOTORB_PIN_2 33
+#define MOTORA_PIN_1 32
+#define MOTORA_PIN_2 33
+#define MOTORB_PIN_1 25
+#define MOTORB_PIN_2 26
 const int PWM_PRECISION = 12;
 const int PWM_MAX = ((1 << PWM_PRECISION) - 1);
 const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
@@ -129,7 +129,7 @@ const int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 // TODO: Partially attenuate Angle PID Kp based on angle max IIR, allowing response
 //       to become more subtle near balance, but immediately ramp up for correction.
 //       Maybe other params are adaptive as well?
-// TODO: Auto-tune pitch trim - observe average power when gSpeedBias == 0, slowly adjust gPitchTrim to bring the averaged gPwmDutyAccumulator closer to 0
+// TODO: Auto-tune pitch trim - observe average power when gThrottleBias == 0, slowly adjust gPitchTrim to bring the averaged gPwmDutyAccumulator closer to 0
 // TODO: Battery gauge: investigate BatterySense library, only sample when the motor is off, or at least not accelerating to a greater magnitude?
 // TODO: Set a battery fault if the voltage falls below a critical level
 // TODO: Use voltage sense to dynamically adjust the pwm range (at the least, the max), but use an IIR or when-motor-off sampling to avoid oscillation from motor draw
@@ -150,20 +150,20 @@ eHBridgeIdleMode gHBridgeIdleMode = eBraking;
 // to float when comparing to gPwmDutyAccumulator / gPwmDutyAppliedMagnitude
 float gDeadZone = 1;
 float gPwmMinDuty = 23;
-float gPwmMaxDuty = 200;                // 160 is nominal ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
+float gPwmMaxDuty = 240;                // 160 is nominal ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
                                         // but a bit more oomph helps recovery
 float gPwmDutyAccumulator = 0.0f;       // The raw PWM target
 float gPwmDutyAppliedMagnitude = 0.0f;  // gPwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
 int gPwmFreq = 16000;
-float gPitchTrim = -2.6f;  // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
+float gPitchTrim = -1.8f;  // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
 
 // The fraction shifted from one motor to the other
 // TODO: Implement PID control for this, driven by encoder input?
 float gYawTrim = 0.0f;
 
-float gSpeedBias = 0.0f;
+float gThrottleBias = 0.0f;
 float gSteeringBias = 0.0f;
-float gMaxThrottleBias = 1.0f;
+float gMaxThrottleBias = (160.0f / 255.0f);  // Target roughly 5V max throttle (with headroom for correction)
 
 
 float gVoltage = 0.0f;
@@ -179,9 +179,9 @@ float gPitchPidKd = 0.06f;
 
 float gDIIRWeight = 1.0f;
 
-float gSpeedIIRWeight = 0.010;
+float gSpeedIIRWeight = 0.020; // Was 0.1.  .01 weights the current speed; the IIR decays to < 2% in one second
 float gVelocityPidKp = 6.0f;
-float gVelocityPidKi = 0.0f;
+float gVelocityPidKi = 2.0f;  // Experimental - overcomes carpet 'stuck', but exacerbates over-acceleration
 float gVelocityPidKd = 0.0f;
 float gVelocityDIIRWeight = 0.50f;
 bool gInvertVelocityPid = true;
@@ -300,15 +300,10 @@ void updateBattery() {
     const float highLevel = 2 * 4.2f;
     gVoltagePercent = max(0.0f, (gVoltage - lowLevel) / (highLevel - lowLevel) * 100.0f);
 
-#ifdef VCC_ADAPTIVE_MAX_PWM
-    // We can auto-adjust the max PWM duty to target a 5V average even as the
-    // battery voltage drops.  This does make manual max PWM duty adjustment moot.
-    // It also removes the ability to overdrive.  However, we could build in the
-    // 'boost reservoir' now...
+    // Auto-adjust the max throttle to limit nominal speed to a 5V average without prohibiting corrective spikes
     if (gVoltage >= 5.0f) {
-      gPwmMaxDuty = (int)((5.0f / gVoltage) * 255.0f + 0.5f);
+      gMaxThrottleBias = min(gPwmMaxDuty / 255.0f * 0.7f, (5.0f / gVoltage));
     }
-#endif
   }
 }
 
@@ -446,11 +441,16 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
   // Check for out-of-bounds velocity (shouldn't happen?)
   bool velocityPidFault = currentVelocityNormalized < -0.01f || currentVelocityNormalized > 1.01f;
 
-  // Account for the current direction of travel
+  // Apply the current direction of travel to the normalized magnitude
   if (gPwmDutyAccumulator < 0.0f)
     currentVelocityNormalized *= -1.0f;
 
   // Smooth the current velocity
+  // NOTE: This smoothing (via gSpeedIIRWeight) plays heavily into the ability to control speed.
+  // While we want to smooth the current velocity to ignore jittering, we also need the smoothed
+  // velocity to respond fast enough to prevent the speed from accelerating to the point where
+  // we no longer have enough corrective capacity to balance.  Similarly, we don't want the memory
+  // of fast movement to bias the speed during low-throttle input.
   static float smoothedVelocityNormalized = 0.0f;
   smoothedVelocityNormalized = gSpeedIIRWeight * currentVelocityNormalized + (1.0f - gSpeedIIRWeight) * smoothedVelocityNormalized;
 
@@ -523,14 +523,16 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
 // small-scale balance very difficult.  Look into better low-range
 // control, possibly remapping the accel data?
 //
+// TODO: Known problems:
+//   * Runaway / persistent velocity - tends to drift after releasing throttle.
+//     Why isn't the velocity pid countering lingering duty w/ counter-tilt?
+//   * Sometimes, a large change of angle runs away rapidly.  Seems like pitch
+//     pid not responding rapidly enough.  Fusion / IMU issue (Kp/Ki)?
 void updateMotors() {
   static int startupPwmAttenuation = 0;
 
-  // TODO: Refactor this:
-  // Inputs (signal, tuning), state, outputs
-
   // ----------------------------------------
-  // Throttle
+  // Perform updates every 5ms (200/sec)
   static unsigned long lastUpdate = 0;
   unsigned long nowMs = millis();
   if (nowMs - lastUpdate < g_update_period)
@@ -539,12 +541,13 @@ void updateMotors() {
 
   // ---------------------------------------
   // Inter-sample time scaling
-
+  // Give the PID feedback accurate time estimates
   // Calculate dT in seconds (the actual time unit is arbitrary, as long as we're consistent)
   static unsigned long lastSampleTimeMs = 0;
   static bool isFirstSample = true;
   float deltaTSec = static_cast<float>(nowMs - lastSampleTimeMs) / 1000.0f;
   lastSampleTimeMs = nowMs;
+
   // The first sample is used only to set the sample time, so that
   // the next sample (the first real one) can be evaluated with an
   // accurate inter-sample deltaT.
@@ -553,31 +556,55 @@ void updateMotors() {
     return;
   }
 
+  // ---------------------------------------
+  // Diagnostics output trigger (currently disabled)
+  static unsigned long lastDiag = 0;
+  bool emitDiag = false;
+  // emitDiag = nowMs - lastDiag > 200;
+  // if (emitDiag)
+  //   lastDiag = nowMs;
+  if (emitDiag) Serial.printf("------------------------------\n");
+
   // --------------------------------------
-  // Pitch-driven PID
-  // The desired speed is calculated as a normalized (relative)
-  // fraction of maximum duty cycle, e.g., [-1.0, 1.0]
-  // Limit the throttle's impact to leave headroom for balance correction via further acceleration,
-  // and to avoid throwing the robot helplessly out of balance via a rapid throttle change.
-  // In practice,
-  float desiredSpeedNormalized = gSpeedBias * gMaxThrottleBias;
-  float desiredAngle;
-  bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredAngle);
+  // Pitch- and Speed-driven PID
+  // The desired and average speeds are evaluated, producing a pitch setpoint.
+  // The desired and current pitch are evaluated, producing nominal acceleration.
+  // The nominal acceleration will later be modified to effect steering.
+  // Either PID implementation can indicate a fault to stop the motors after a
+  // very short debouncing period.
 
-  desiredAngle += gPitchTrim;
+  // The desired speed is calculated as a normalized (relative) fraction of
+  // the configured maximum duty cycle, e.g., [-1.0, 1.0], but is scaled down
+  // to leave headroom for balance correction via further acceleration.
+  float desiredSpeedNormalized = min(gThrottleBias, gMaxThrottleBias);  // gThrottleBias (unit), gMaxThrottleBias (1.0)
+  float desiredPitchOut = 0.0f;
+  bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredPitchOut);
+  if (emitDiag) {
+    Serial.printf("desiredSpeedNormalized   : %.1f\n", desiredSpeedNormalized);
+    Serial.printf("desiredPitchOut          : %.1f\n", desiredPitchOut);
+  }
+
+  // The current pitch will be compared to the desired pitch setpoint to determine
+  // what acceleration is necessary to achieve that pitch setpoint.
+  float desiredPitchTrimmed = desiredPitchOut + gPitchTrim;
   float pidAccelOut;  // -255..255 nominal
-  bool pitchPidFault = pitchPidUpdate(desiredAngle, deltaTSec, pidAccelOut);
-
-  // ----------------------------------
-  // Convert PID guidance to normalized PWM duty cycle
-
-  // Note that we want the acceleration (not speed) to be modulated by the PID output.
+  bool pitchPidFault = pitchPidUpdate(desiredPitchTrimmed, deltaTSec, pidAccelOut);
+  // The acceleration is constrained to a reasonable range
   float rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
+  if (emitDiag) {
+    Serial.printf("pidAccelOut              : %.1f\n", pidAccelOut);
+    Serial.printf("rawAccel                 : %.1f\n", rawAccel);
+  }
 
-  // Attenuate the PWM output on startup to prevent noisy output
   float constrainedAccel = constrain(rawAccel, (float)-startupPwmAttenuation, (float)startupPwmAttenuation);
+
+  // Upon startup, and after recovery from a fault, enforce a soft-start
+  // by 'fading in' the max duty cycle
   if (startupPwmAttenuation < 255)
     ++startupPwmAttenuation;
+  if (emitDiag) {
+    Serial.printf("constrainedAccel         : %.1f\n", constrainedAccel);
+  }
 
 #ifdef ADAPTIVE_FUSION_KI
   // The rate at which the fusion filter corrects integrated gyro data from the gravity (accel) vector
@@ -590,35 +617,143 @@ void updateMotors() {
   gMahonyKiScale = 1.0f - normalizedAccelMagPeak;
 #endif
 
+  // ----------------------------------
+  // Convert PID guidance to normalized PWM duty cycle
+
   // Adjust the speed by the desired relative acceleration, constraining the duty cycle to the PWM limits.
   // Note that this can be negative, to indicate a reversed direction.
-  // TODO: Permit brief excusions beyond gPwmMaxDuty (up to 255) for recovery, but trigger 'unsafe' if operating beyond saturation for more than briefly?)
-  //   Split gPwmMaxDuty into soft & hard limits (default to 255?)
-  //   Maintain a 'cap' reservoir
-  //   Regenerate toward hard max + delay when target is less than soft max
-  //     don't just reset - need to provide time for the motor to cool down
-  //     delay scale is based on update frequency, decay mode, and permitted time-at-max (should be small)
-  //   constrain to cap, reduce cap (decrement or decay) if > soft max
-  // TODO: Encapsulate the above, and perform it independently for each motor!
+  // TODO: Permit brief excusions beyond gPwmMaxDuty (up to 255) for recovery, but trigger
+  //       'unsafe' if operating beyond saturation for more than briefly?)
+  //       * Split gPwmMaxDuty into soft & hard limits (default to 255?)
+  //       * Maintain a 'cap' reservoir
+  //       * Constrain to cap, reduce cap (decrement or decay) if > soft max
+  //       * Regenerate toward hard max + delay when target is less than soft max
+  //         * don't just reset - need to provide time for the motor to cool down
+  //         * delay scale is based on update frequency, decay mode, and permitted time-at-max (should be small)
   // TODO: Physical limit switches to pull DVR8833 SLEEP low if laying down (in addition to the manual switch)
+  //       Similarly, use a pulldown resistor with a GPIO as an explicit enable override to avoid spurious motor
+  //       activity on startup.
   gPwmDutyAccumulator = constrain(gPwmDutyAccumulator + constrainedAccel, -gPwmMaxDuty, gPwmMaxDuty);
+  if (emitDiag) {
+    Serial.printf("gPwmDutyAccumulator      : %.1f\n", gPwmDutyAccumulator);
+  }
+  // An initial attempt to fix steering...
+  // Nominally, steering behaves like a vehicle (i.e., the vehicle's path,
+  // forward or backwards, bends toward the steering direction). In practice,
+  // this means that the direction of rotation changes when the vehicle
+  // switched between forward and backward motion.
+  // However, if we need to 'twitch' opposite the direction of travel to
+  // maintain balance, we want to maintain the direction of rotation.
+  // Like a multi-point turn in a vehicle, this is accomplished by inverting
+  // the steering direction when the direction of travel changes.  But we
+  // ONLY want to do that when the direction change is corrective.
+  // EXPERIMENT: I think it would be better to not simulate a 4-wheel vehicle....
+  // A 2-wheel balance bot is always turning about its center.
+  // Always invert steering when reversing directions
+  // The challenge is near-balance...
+  // To account for the dead zone, we'll also maintain rotation direction if
+  // the current speed
+  int intendedDirection = std::signbit(desiredSpeedNormalized);
+  int activeDirection = std::signbit(gPwmDutyAccumulator);
+  bool isCorrectiveReverse = intendedDirection != activeDirection;
+  // abs(gPwmDutyAccumulator) > gPwmMinDuty;
 
-  // Optional filter
+  // Optional filter, smoothing the motor speed output.
+  // In practice, the weight has been in the 0.9-1.0 range, making this filter have little real effect.
   // TODO: Predictive window-based outlier attenuation, but otherwise allow small variations with no additional latency?
   if (gMotorFilter <= 0.999f) {
-    static float motorIIR = 0;
-    motorIIR = (gMotorFilter * gPwmDutyAccumulator) + (1.0 - gMotorFilter) * motorIIR;
+    static float motorIIR = 0.0f;
+    motorIIR = (gMotorFilter * gPwmDutyAccumulator) + (1.0f - gMotorFilter) * motorIIR;
     gPwmDutyAccumulator = motorIIR;
+    if (emitDiag) {
+      Serial.printf("gPwmDutyAccumulatorSm    : %.1f\n", gPwmDutyAccumulator);
+    }
   }
 
-  if (gPwmDutyAccumulator < gDeadZone && gPwmDutyAccumulator > -gDeadZone) {
-    gPwmDutyAccumulator = 0.0f;
-    gPwmDutyAppliedMagnitude = 0.0f;
-  } else {
-    // We're not in the dead zone; compress the output to eliminate the dead zone
-    gPwmDutyAppliedMagnitude = map(std::abs(gPwmDutyAccumulator), gDeadZone, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
+  // Apply steering and compress the output to eliminate the dead zone
+  float unsteeredDutyMagnitude = std::abs(gPwmDutyAccumulator);
+  bool isUnsteeredReversed = gPwmDutyAccumulator < 0.0f;
+  if (emitDiag) {
+    Serial.printf("unsteeredDutyMagnitude   : %.1f\n", unsteeredDutyMagnitude);
+    Serial.printf("isUnsteeredReversed      : %s\n", isUnsteeredReversed ? "true" : "false");
   }
 
+  // Dampen the steering input to reserve sufficient capacity in each motor for correction
+  // Both the trim & bias are normalized ([-1.0, 1.0])
+  float effectiveYawFraction = gYawTrim + gSteeringBias * 0.6f;
+  //if (isCorrectiveReverse)
+  if (isUnsteeredReversed)
+    effectiveYawFraction *= -1;
+  if (emitDiag) {
+    Serial.printf("effectiveYawFraction     : %.1f\n", effectiveYawFraction);
+  }
+
+  // Steering controls 50% of active range at rest, reduced by 75% at full speed
+  // Adaptive steering *reduces* steering influence as speed increases
+  // (e.g., to prevent excessively sharp turns at speed)
+  float fractionOfMaxSpeed = unsteeredDutyMagnitude / gPwmMaxDuty;
+  float maxSteeringDelta = ((gPwmMaxDuty - gPwmMinDuty) / 2.0f) * (1.0f - fractionOfMaxSpeed * 0.75f);
+  float appliedSteeringDelta = effectiveYawFraction * maxSteeringDelta;
+  if (emitDiag) {
+    Serial.printf("appliedSteeringDelta     : %.1f\n", appliedSteeringDelta);
+  }
+
+  // Apply the steering, splitting the output into two independent motor channels.
+  // We'll work with magnitude (independent of direction), and a flag to indicate each motor's direction.
+  // This makes some of the PWM calculations a bit easier.
+  // Note that we're NOT changing this math depending upon forward/backward direction...
+  // Because we're working with magnitude, for a given yaw direction (e.g., +/clockwise
+  // or -/counterclockwise), the same motor increases in speed. This properly simulates
+  // a traditional steering approach.
+  float unscaledPwmMagnitudeA = min(gPwmMaxDuty, unsteeredDutyMagnitude + appliedSteeringDelta);
+  float unscaledPwmMagnitudeB = min(gPwmMaxDuty, unsteeredDutyMagnitude - appliedSteeringDelta);
+  if (emitDiag) {
+    Serial.printf("unscaledPwmMagnitudeA/B  : %.1f / %.1f\n", unscaledPwmMagnitudeA, unscaledPwmMagnitudeB);
+  }
+
+  // The motors' 'reverse' flags are first set by the unsteered direction,
+  // but will flip when reconciling (normalizing) a negative speed.
+  bool reverseA = isUnsteeredReversed;
+  bool reverseB = reverseA;
+  if (unscaledPwmMagnitudeA < 0.0f) {
+    unscaledPwmMagnitudeA = -unscaledPwmMagnitudeA;
+    reverseA = !reverseA;
+  }
+  if (unscaledPwmMagnitudeB < 0.0f) {
+    unscaledPwmMagnitudeB = -unscaledPwmMagnitudeB;
+    reverseB = !reverseB;
+  }
+  if (emitDiag) {
+    Serial.printf("reverseA/B               : %s / %s\n", reverseA ? "true" : "false", reverseB ? "true" : "false");
+    Serial.printf("unscaledPwmMagnitudeA/B. : %.1f / %.1f\n", unscaledPwmMagnitudeA, unscaledPwmMagnitudeB);
+  }
+
+  // Outputs near to zero are entirely shut down. This is the 'dead zone'.
+  //   (note that because we're working with magnitude (absolute value), we
+  //    don't need to check the negative side of the dead zone)
+  // Otherwise, scale the output into the active region
+  if (unscaledPwmMagnitudeA <= gDeadZone)
+    unscaledPwmMagnitudeA = 0.0f;
+  else
+    unscaledPwmMagnitudeA = map(std::abs(unscaledPwmMagnitudeA), gDeadZone, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
+
+  if (unscaledPwmMagnitudeB <= gDeadZone)
+    unscaledPwmMagnitudeB = 0.0f;
+  else
+    unscaledPwmMagnitudeB = map(std::abs(unscaledPwmMagnitudeB), gDeadZone, gPwmMaxDuty, gPwmMinDuty, gPwmMaxDuty);
+  if (emitDiag) {
+    Serial.printf("unscaledPwmMagnitudeA/B..: %.1f / %.1f\n", unscaledPwmMagnitudeA, unscaledPwmMagnitudeB);
+  }
+
+  // Capture the average applied magnitude, which is used as a proxy for current speed,
+  // and is required by the velocity PID for speed control.
+  if (reverseA == reverseB)
+    gPwmDutyAppliedMagnitude = (unscaledPwmMagnitudeA + unscaledPwmMagnitudeB) / 2.0f;
+  else
+    gPwmDutyAppliedMagnitude = abs(unscaledPwmMagnitudeA - unscaledPwmMagnitudeB) / 2.0f;
+  // if (emitDiag) {
+  //   Serial.printf("gPwmDutyAppliedMagnitude : %.1f\n", gPwmDutyAppliedMagnitude);
+  // }
 
   // -----------------------
   // Safety limiter
@@ -654,9 +789,9 @@ void updateMotors() {
     gPwmDutyAccumulator = 0.0f;
     gPwmDutyAppliedMagnitude = 0.0f;
     startupPwmAttenuation = 0;
-    gSpeedBias = 0.0f;
+    gThrottleBias = 0.0f;
     gSteeringBias = 0.0f;
-
+    unscaledPwmMagnitudeA = unscaledPwmMagnitudeB = 0.0f;
   } else if (faultLedState) {
     digitalWrite(LED_PIN, LOW);
     faultLedState = false;
@@ -667,49 +802,41 @@ void updateMotors() {
 
   // Depending upon direction, the DRV8833 needs different pins driven.
   // We also scale the magnitude to match the higher precision of the PWM duty cycle (e.g., 12 bits instead of 8)
-  // gYawTrim is used to slow one of the two motors to induce a turn.
-  // TODO: This needs to respect the minPwm... if attempting to reduce below min PWM, add to the other side
-  bool m1Driven;
   int ma1 = 0, ma2 = 0;
   int mb1 = 0, mb2 = 0;
 
-  float scaledPwmMagnitudeA = gPwmDutyAppliedMagnitude * PWM_SCALE_FROM_8BIT;
-  float scaledPwmMagnitudeB = scaledPwmMagnitudeA;
-  
-  // Dampen the steering input to reserve some capacity in each motor for correction
-  float effectiveYaw = gYawTrim + gSteeringBias * 0.6;
 
-  // Apply steering adjustments only when not faulted
-  if (!faultLedState) {
-    // TODO: Allow each motor to be driven forward or backward independently
-    // TODO: Applying the yaw/steering here is inaccurate - we should be scaling within the pwm min/max, not on an absolute scale
-    if (effectiveYaw > 0.0f) {
-      scaledPwmMagnitudeB *= (1.0f - effectiveYaw);
-    } else if (effectiveYaw < 0.0f) {
-      scaledPwmMagnitudeA *= (1.0f + effectiveYaw);
-    }
-  }
-  // Update gPwmDutyAppliedMagnitude to account for the steering tweak, allowing more accurate speed estimation and control
-  gPwmDutyAppliedMagnitude = (scaledPwmMagnitudeA + scaledPwmMagnitudeB) / (2 * PWM_SCALE_FROM_8BIT);
+  // Scale the Pwm duty to the full 12-bit precision that we've configured on the ESP32.
+  // This allows for smoother control, especially in the lower end of the pwoer range.
+  float scaledPwmMagnitudeA = unscaledPwmMagnitudeA * PWM_SCALE_FROM_8BIT;
+  float scaledPwmMagnitudeB = unscaledPwmMagnitudeB * PWM_SCALE_FROM_8BIT;
 
+  // Quantize for compatibility with analogWrite
   int quantizedMagnitudeA = (int)std::round(scaledPwmMagnitudeA);
   int quantizedMagnitudeB = (int)std::round(scaledPwmMagnitudeB);
-  if (gPwmDutyAccumulator < 0.0f) {
-    // Note: for fast-decay (coasting), one pin is pulled low, the other is high at the desired duty.
-    // For slow-decay (braking), one pin is pulled high, the other is low at the desired duty.
-    // Because analogWrite specified the high-side duty cycle, slow-decay mode means we invert both
-    // of the duty cycles (i.e., 255 on on to hold it high, and 255-duty on the other, so that it is
-    // LOW at the desired duty)
+  if (emitDiag) {
+    Serial.printf("quantizedMagnitudeA/B    : %d, %df\n", quantizedMagnitudeA, quantizedMagnitudeB);
+  }
+
+  // Here's where we reverse each motor, if needed.
+  if (reverseA) {
     ma2 = quantizedMagnitudeA;
-    mb2 = quantizedMagnitudeB;
-    m1Driven = false;
   } else {
     ma1 = quantizedMagnitudeA;
+  }
+
+  if (reverseB) {
+    mb2 = quantizedMagnitudeB;
+  } else {
     mb1 = quantizedMagnitudeB;
-    m1Driven = true;
   }
 
   // Adjust for braking (slow-decay) / coasting (fast-decay) drive modes.
+  // For fast-decay (coasting), one pin is held low, the other is high at the desired duty.
+  // For slow-decay (braking), one pin is held high, the other is low at the desired duty.
+  // Because analogWrite specifies the high-side duty cycle, slow-decay mode means we invert both
+  // of the duty cycles (i.e., 255 on on to hold it high, and 255-duty on the other, so that it is
+  // LOW at the desired duty)
   if (gHBridgeIdleMode == eBraking) {
     // To invert the H-Bridge input, invert the levels and also
     // swap the driven IO to maintain direction.
@@ -720,8 +847,6 @@ void updateMotors() {
     m1Temp = mb1;
     mb1 = PWM_MAX - mb2;
     mb2 = PWM_MAX - m1Temp;
-
-    m1Driven = !m1Driven;
   }
 
   // Update the motor PWM.
@@ -749,10 +874,11 @@ void initMotors() {
 
   // Initializing the motor pins uniformly solves the 'jerk on startup' problem
   if (gHBridgeIdleMode == eBraking) {
-    analogWrite(MOTORA_PIN_1, 1);
-    analogWrite(MOTORA_PIN_2, 1);
-    analogWrite(MOTORB_PIN_1, 1);
-    analogWrite(MOTORB_PIN_2, 1);
+    unsigned int pwmAlwaysOn = 255 * PWM_SCALE_FROM_8BIT;
+    analogWrite(MOTORA_PIN_1, pwmAlwaysOn);
+    analogWrite(MOTORA_PIN_2, pwmAlwaysOn);
+    analogWrite(MOTORB_PIN_1, pwmAlwaysOn);
+    analogWrite(MOTORB_PIN_2, pwmAlwaysOn);
   } else {
     analogWrite(MOTORA_PIN_1, 0);
     analogWrite(MOTORA_PIN_2, 0);
@@ -815,7 +941,7 @@ void handleInput() {
     // -1.0 .. +1.0
     gSteeringBias = g_joystick_analog_state.x_axis;
     // Remap to +/- 20 degrees
-    gSpeedBias = g_joystick_analog_state.y_axis;
+    gThrottleBias = g_joystick_analog_state.y_axis;
   } else if (g_last_message_type == MSGTYPE_RMT_JOYSTICK && g_joystick_state.count > 0) {
     // Extract the joystick state
     bool up = (g_joystick_state.joystick_direction & JOYSTICK_UP) != 0;
@@ -973,7 +1099,7 @@ void handleInput() {
           gPwmFreq = 2 * g_update_freq;
           gPitchTrim = -2.6f;
           gYawTrim = 0.0f;
-          gSpeedBias = 0.0f;
+          gThrottleBias = 0.0f;
           gSteeringBias = 0.0f;
           gPitchPidKp = 0.0f;
           gPitchPidKi = 0.0f;
