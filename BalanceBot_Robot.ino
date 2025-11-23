@@ -470,7 +470,7 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
   float P = velocityErrorNormalized;
 
   // Integral feedback
-  static float errorIntegral = 0.0;
+  static float errorIntegral = 0.0f;
 
   // Clear the integral when crossing the setpoint.
   static int lastErrorSign = 0;
@@ -479,11 +479,9 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
     errorIntegral = 0;
   lastErrorSign = currentErrorSign;
 
-  // Only integrate error when we aren't saturated or stationary
-  // This uses the instantaneous (non-smoothed) velocity to ensure we're
-  // able to detect saturation without lag.
+  // Only integrate error when we aren't throttle-saturated or stationary
   float curVelMag = std::abs(currentVelocityNormalized);
-  if (curVelMag > 0.01f && curVelMag < 0.99f) {
+  if (curVelMag > 0.01f && curVelMag < gMaxThrottleBias) {
     // velocityErrorNormalized is unitless, measuring the raw delta between normalized current and target velocity.
     // The normalized velocity ranges across [-1.0, 1.0], and we want integration to be reasonably
     // agnostic to the update period.  So... we scale the velocity error by deltaT so that we're
@@ -576,7 +574,10 @@ void updateMotors() {
   // The desired speed is calculated as a normalized (relative) fraction of
   // the configured maximum duty cycle, e.g., [-1.0, 1.0], but is scaled down
   // to leave headroom for balance correction via further acceleration.
-  float desiredSpeedNormalized = min(gThrottleBias, gMaxThrottleBias);  // gThrottleBias (unit), gMaxThrottleBias (1.0)
+  float desiredSpeedNormalized = min(abs(gThrottleBias), gMaxThrottleBias);  // gThrottleBias (unit), gMaxThrottleBias (1.0)
+  if (gThrottleBias < 0)
+    desiredSpeedNormalized *= -1.0;
+
   float desiredPitchOut = 0.0f;
   bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredPitchOut);
   if (emitDiag) {
