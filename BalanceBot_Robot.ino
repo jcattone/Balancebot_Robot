@@ -179,7 +179,7 @@ float gPitchPidKd = 0.06f;
 
 float gDIIRWeight = 1.0f;
 
-float gSpeedIIRWeight = 0.020; // Was 0.1.  .01 weights the current speed; the IIR decays to < 2% in one second
+float gSpeedIIRWeight = 0.020;  // Was 0.1.  .01 weights the current speed; the IIR decays to < 2% in one second
 float gVelocityPidKp = 6.0f;
 float gVelocityPidKi = 2.0f;  // Experimental - overcomes carpet 'stuck', but exacerbates over-acceleration
 float gVelocityPidKd = 0.0f;
@@ -792,7 +792,7 @@ void updateMotors() {
     gThrottleBias = 0.0f;
     gSteeringBias = 0.0f;
     unscaledPwmMagnitudeA = unscaledPwmMagnitudeB = 0.0f;
-  } else if (faultLedState) {
+  } else if (!pidFault && faultLedState) {
     digitalWrite(LED_PIN, LOW);
     faultLedState = false;
   }
@@ -1282,6 +1282,9 @@ void updateOrientation() {
   // Get the accel (gravity vector) in m/s
   // Get the gyro (turn rate) in radians-per-second
   mpu.getEvent(&a, &g, &temp);
+  if (!std::isfinite(g.gyro.x) || !std::isfinite(g.gyro.y) || !std::isfinite(g.gyro.z) || !std::isfinite(a.acceleration.x) || !std::isfinite(a.acceleration.y) || !std::isfinite(a.acceleration.z)) {
+    return;
+  }
 
   // Update in degrees-per-second and gravities
   filter.setKp(gMahonyKp);
