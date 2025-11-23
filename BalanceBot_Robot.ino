@@ -57,6 +57,8 @@ const int g_update_freq = 200;  // Hz
 const int g_sample_period = 1000 / g_sample_freq;  // ms
 const int g_update_period = 1000 / g_update_freq;  // ms
 
+bool gImuFault = false;
+
 // Initialize the IMU filter weights:
 // Kp ~= trust accel data (gravity vector) to correct gyro drift
 //   High Kp = correct quickly, but linear acceleration (i.e., translation) can be misread as orientation change
@@ -155,7 +157,7 @@ float gPwmMaxDuty = 240;                // 160 is nominal ((2 * 4.2) - 0.7) * (1
 float gPwmDutyAccumulator = 0.0f;       // The raw PWM target
 float gPwmDutyAppliedMagnitude = 0.0f;  // gPwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
 int gPwmFreq = 16000;
-float gPitchTrim = -1.8f;  // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
+float gPitchTrim = -2.8f;  // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
 
 // The fraction shifted from one motor to the other
 // TODO: Implement PID control for this, driven by encoder input?
@@ -164,7 +166,6 @@ float gYawTrim = 0.0f;
 float gThrottleBias = 0.0f;
 float gSteeringBias = 0.0f;
 float gMaxThrottleBias = (160.0f / 255.0f);  // Target roughly 5V max throttle (with headroom for correction)
-
 
 float gVoltage = 0.0f;
 float gVoltagePercent = 0.0f;
@@ -332,10 +333,9 @@ bool pitchPidUpdate(float desiredAngle, float deltaTSec, float& accelOut) {
   // or (perhaps more accurately), cos(angle) where vertical is 0
 
   // PID per-update inputs
-  // TODO: trim for the balance point
-  // TODO: setpoint offset for travel
+  // gPitchTrim shifts the reported angle to a 'true' angle.
   // [-90, -90] generally speaking (pitch decreases after 90 for some reason?)
-  float currentAngle = gOrientation.pitch;
+  float currentAngle = gOrientation.pitch - gPitchTrim;
 
   // --------------------------------------
   // Pitch-driven fault detection with hysteresis
@@ -469,7 +469,7 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
   // Proportional feedback
   float P = velocityErrorNormalized;
 
-  // Integral feedback
+  // Integral feedback with anti-windup
   static float errorIntegral = 0.0f;
 
   // Clear the integral when crossing the setpoint.
@@ -479,14 +479,25 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
     errorIntegral = 0;
   lastErrorSign = currentErrorSign;
 
-  // Only integrate error when we aren't throttle-saturated or stationary
+  // Anti-windup: Only integrate error when we have corrective capacity
+  // Stop accumulating integral when:
+  // 1. Velocity exceeds desired (error is positive, meaning we're going faster than commanded)
+  // 2. Motor is saturated at gMaxThrottleBias (no room for further commanded acceleration)
   float curVelMag = std::abs(currentVelocityNormalized);
-  if (curVelMag > 0.01f && curVelMag < gMaxThrottleBias) {
+  bool isSaturated = curVelMag >= gMaxThrottleBias;
+  bool isExceedingDesiredSpeed = velocityErrorNormalized > 0.001f;
+
+  if (curVelMag > 0.01f && !isSaturated && !isExceedingDesiredSpeed) {
     // velocityErrorNormalized is unitless, measuring the raw delta between normalized current and target velocity.
     // The normalized velocity ranges across [-1.0, 1.0], and we want integration to be reasonably
     // agnostic to the update period.  So... we scale the velocity error by deltaT so that we're
     // integrating one velocityErrorNormalized per second.
     errorIntegral += velocityErrorNormalized * deltaTSec;
+  } else if (isSaturated || isExceedingDesiredSpeed) {
+    // When saturated or overspeeding, gradually decay the integral to prevent it from
+    // persisting and causing overshoot on the next cycle.
+    // Decay factor: 0.95 means 5% reduction per cycle; at 200Hz, this will decay rapidly
+    errorIntegral *= 0.95f;
   }
 
   // Any scaling applied to the integral would just a scalar adjustment to Ki, so we'll avoid any further
@@ -587,9 +598,8 @@ void updateMotors() {
 
   // The current pitch will be compared to the desired pitch setpoint to determine
   // what acceleration is necessary to achieve that pitch setpoint.
-  float desiredPitchTrimmed = desiredPitchOut + gPitchTrim;
   float pidAccelOut;  // -255..255 nominal
-  bool pitchPidFault = pitchPidUpdate(desiredPitchTrimmed, deltaTSec, pidAccelOut);
+  bool pitchPidFault = pitchPidUpdate(desiredPitchOut, deltaTSec, pidAccelOut);
   // The acceleration is constrained to a reasonable range
   float rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
   if (emitDiag) {
@@ -654,10 +664,6 @@ void updateMotors() {
   // The challenge is near-balance...
   // To account for the dead zone, we'll also maintain rotation direction if
   // the current speed
-  int intendedDirection = std::signbit(desiredSpeedNormalized);
-  int activeDirection = std::signbit(gPwmDutyAccumulator);
-  bool isCorrectiveReverse = intendedDirection != activeDirection;
-  // abs(gPwmDutyAccumulator) > gPwmMinDuty;
 
   // Optional filter, smoothing the motor speed output.
   // In practice, the weight has been in the 0.9-1.0 range, making this filter have little real effect.
@@ -682,7 +688,6 @@ void updateMotors() {
   // Dampen the steering input to reserve sufficient capacity in each motor for correction
   // Both the trim & bias are normalized ([-1.0, 1.0])
   float effectiveYawFraction = gYawTrim + gSteeringBias * 0.6f;
-  //if (isCorrectiveReverse)
   if (isUnsteeredReversed)
     effectiveYawFraction *= -1;
   if (emitDiag) {
@@ -693,10 +698,13 @@ void updateMotors() {
   // Adaptive steering *reduces* steering influence as speed increases
   // (e.g., to prevent excessively sharp turns at speed)
   float fractionOfMaxSpeed = unsteeredDutyMagnitude / gPwmMaxDuty;
-  float maxSteeringDelta = ((gPwmMaxDuty - gPwmMinDuty) / 2.0f) * (1.0f - fractionOfMaxSpeed * 0.75f);
+  float maxSteeringDelta = ((gPwmMaxDuty - gPwmMinDuty) * 0.50f) * (1.0f - fractionOfMaxSpeed * 0.75f);
   float appliedSteeringDelta = effectiveYawFraction * maxSteeringDelta;
+  // If the steering would put either motor over the max driven duty, back both motors off by the overage
+  float steeringOffset = -min(appliedSteeringDelta, max(0.0f, unsteeredDutyMagnitude + appliedSteeringDelta - gPwmMaxDuty * gMaxThrottleBias));
   if (emitDiag) {
     Serial.printf("appliedSteeringDelta     : %.1f\n", appliedSteeringDelta);
+    Serial.printf("steeringOffset           : %.1f\n", steeringOffset);
   }
 
   // Apply the steering, splitting the output into two independent motor channels.
@@ -706,8 +714,8 @@ void updateMotors() {
   // Because we're working with magnitude, for a given yaw direction (e.g., +/clockwise
   // or -/counterclockwise), the same motor increases in speed. This properly simulates
   // a traditional steering approach.
-  float unscaledPwmMagnitudeA = min(gPwmMaxDuty, unsteeredDutyMagnitude + appliedSteeringDelta);
-  float unscaledPwmMagnitudeB = min(gPwmMaxDuty, unsteeredDutyMagnitude - appliedSteeringDelta);
+  float unscaledPwmMagnitudeA = min(gPwmMaxDuty, unsteeredDutyMagnitude + appliedSteeringDelta + steeringOffset);
+  float unscaledPwmMagnitudeB = min(gPwmMaxDuty, unsteeredDutyMagnitude - appliedSteeringDelta + steeringOffset);
   if (emitDiag) {
     Serial.printf("unscaledPwmMagnitudeA/B  : %.1f / %.1f\n", unscaledPwmMagnitudeA, unscaledPwmMagnitudeB);
   }
@@ -762,20 +770,20 @@ void updateMotors() {
   // Upon reactivation, the soft-start is reset
 
   // Track the contiguous duration over which any fault exists
-  static unsigned long pidFaultTimeMs = 0;
-  static bool pidFault = false;
-  bool wasPidFault = pidFault;
-  pidFault = velocityPidFault || pitchPidFault;
-  if (pidFault && !wasPidFault) {
+  static unsigned long anyFaultTimeMs = 0;
+  static bool anyFault = false;
+  bool wasPidFault = anyFault;
+  anyFault = velocityPidFault || pitchPidFault || gImuFault;
+  if (anyFault && !wasPidFault) {
     if (velocityPidFault)
       Serial.println("Velocity Fault!");
     else
       Serial.println("Pitch Fault!");
-    pidFaultTimeMs = nowMs;
+    anyFaultTimeMs = nowMs;
   }
 
   static bool faultLedState = false;
-  if (pidFault && (nowMs - pidFaultTimeMs) > 100) {
+  if (anyFault && (nowMs - anyFaultTimeMs) > 100) {
     // In case we're experimenting without the motor enabled,
     // the onboard LED is used as a fault indicator.  The
     // transition is placed here (instead of above) to ensure
@@ -793,7 +801,7 @@ void updateMotors() {
     gThrottleBias = 0.0f;
     gSteeringBias = 0.0f;
     unscaledPwmMagnitudeA = unscaledPwmMagnitudeB = 0.0f;
-  } else if (!pidFault && faultLedState) {
+  } else if (!anyFault && faultLedState) {
     digitalWrite(LED_PIN, LOW);
     faultLedState = false;
   }
@@ -805,7 +813,6 @@ void updateMotors() {
   // We also scale the magnitude to match the higher precision of the PWM duty cycle (e.g., 12 bits instead of 8)
   int ma1 = 0, ma2 = 0;
   int mb1 = 0, mb2 = 0;
-
 
   // Scale the Pwm duty to the full 12-bit precision that we've configured on the ESP32.
   // This allows for smoother control, especially in the lower end of the pwoer range.
@@ -1284,8 +1291,10 @@ void updateOrientation() {
   // Get the gyro (turn rate) in radians-per-second
   mpu.getEvent(&a, &g, &temp);
   if (!std::isfinite(g.gyro.x) || !std::isfinite(g.gyro.y) || !std::isfinite(g.gyro.z) || !std::isfinite(a.acceleration.x) || !std::isfinite(a.acceleration.y) || !std::isfinite(a.acceleration.z)) {
+    gImuFault = true;
     return;
   }
+  gImuFault = false;
 
   // Update in degrees-per-second and gravities
   filter.setKp(gMahonyKp);
