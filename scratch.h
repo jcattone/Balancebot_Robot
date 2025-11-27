@@ -1,6 +1,36 @@
 #if false
 
   
+// TODO: Motor gain/trim (i.e., adjust for differences in left/right speed or stiction-break)
+// TODO: Wheel encoders for feedback / auto-calibrate trim
+// TODO: Floor-proximity and collision sensors
+// TODO: Third-tier w/ additional sensors?
+// TODO: Clean up wiring
+// TODO: Easier onboard vs. usb power switching
+// TODO: Settings persistence
+// TODO: Allow a small anti-stiction reservoir (reset when the motor is turned off) to briefly (and mildly) boost the power when transitioning out of a full-stop
+// TODO: Sometimes locks up after a fall (motor stuck running, no further variation or remote response)
+//       (might have been related to a buffer overflow when writing to the remote display buffer)
+// TODO: Separate params for coasting/braking modes
+// TODO: Partially attenuate Angle PID Kp based on angle max IIR, allowing response
+//       to become more subtle near balance, but immediately ramp up for correction.
+//       Maybe other params are adaptive as well?
+// TODO: Auto-tune pitch trim - observe average power when gThrottleBias == 0, slowly adjust gPitchTrim to bring the averaged gPwmDutyAccumulator closer to 0
+// TODO: Battery gauge: investigate BatterySense library, only sample when the motor is off, or at least not accelerating to a greater magnitude?
+// TODO: Set a battery fault if the voltage falls below a critical level
+// TODO: Use voltage sense to dynamically adjust the pwm range (at the least, the max), but use an IIR or when-motor-off sampling to avoid oscillation from motor draw
+
+// Alt: pwmFreq: 400, Kp 6.9/0.3, p0.86/0/0.3, P_IIR 0.5, v8.0,0,0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
+//   Weak balance, somewhat jittery
+// Alt: pwmFreq: 16k, Kp 3.7/0.3, p0.46/0/0.04, P_IIR: 0.5, v6/0/0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
+//   Seems a resilient (if rubberbandy) balance, driveable, somewhat resistant to sudden wheel blockage
+//   pKd=0.07, P_IIR=1.0 seems to reduce jitter and be just enough responsive to moderate disturbances
+//   Learning... overly aggressive Mahony Kp was at the heart of much of the jitter and instability.
+//   D-smoothing (gDIIRWeight) further caused D to lag.  This might have produced a phase offset (lag)
+//     that resulted in oscillation / orbiting in the state-space?
+//   While keeping target speeds to < 5V average for the motors' benefit, we can use brief bursts up to full
+//     supply voltage (~8.4V) for emergency correction. However, that should be limited to prevent motor damage.
+
 
   // rawSpeed is a number strictly within the range [0, 255]
   // Here, we use the roll as the speed, approaching full speed as we approach 90 degrees.

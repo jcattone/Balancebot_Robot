@@ -7,7 +7,7 @@ struct OrientationAngles {
   float pitch;
   float roll;
   float yaw;
-} gOrientation;
+};
 
 // To support multiple config modes...
 // TODO: Add the disply-only yaw/pitch/roll & diag for remote display, so that we can remove the SSD1306
