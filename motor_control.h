@@ -2,5 +2,5 @@
 #include "tuning.h"
 #include "types.h"
 
-void initMotors(DriveParams* params);
+void initMotors(DriveParams* params, DriveState* state);
 void updateMotors(BalanceState* state);

@@ -16,12 +16,6 @@ unsigned long last_hid_input_timestamp = 0;
 float gAccelPeakDecay = 0.990f;
 #endif
 
-float gPwmDutyAccumulator = 0.0f;       // The raw PWM target
-float gPwmDutyAppliedMagnitude = 0.0f;  // gPwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
-int gPwmFreq = 16000;
-
-
-
 float gVoltage = 0.0f;
 float gVoltagePercent = 0.0f;
 
@@ -105,6 +99,7 @@ void handleInput(BalanceState* state) {
   // lastUpdate = now;
 
   auto& dp = state->driveParams;
+  auto& ds = state->driveState;
 
   static unsigned long last_hid_message_processed = 0;
   if (last_hid_message_processed == last_hid_input_timestamp)
@@ -191,15 +186,15 @@ void handleInput(BalanceState* state) {
       case ePwmFreq:
         {
           for (int i = 0; i < count; ++i) {
-            if (right) gPwmFreq = min(19000, max(gPwmFreq + 1, (int)(gPwmFreq * 1.1f)));
-            else if (left) gPwmFreq = max(10, min(gPwmFreq - 1, (int)(gPwmFreq / 1.1f)));
+            if (right) ds.pwmFreq = min(19000, max(ds.pwmFreq + 1, (int)(ds.pwmFreq * 1.1f)));
+            else if (left) ds.pwmFreq = max(10, min(ds.pwmFreq - 1, (int)(ds.pwmFreq / 1.1f)));
           }
 
           if (right || left) {
-            analogWriteFrequency(MOTORA_PIN_1, gPwmFreq);
-            analogWriteFrequency(MOTORA_PIN_2, gPwmFreq);
-            analogWriteFrequency(MOTORB_PIN_1, gPwmFreq);
-            analogWriteFrequency(MOTORB_PIN_2, gPwmFreq);
+            analogWriteFrequency(MOTORA_PIN_1, ds.pwmFreq);
+            analogWriteFrequency(MOTORA_PIN_2, ds.pwmFreq);
+            analogWriteFrequency(MOTORB_PIN_1, ds.pwmFreq);
+            analogWriteFrequency(MOTORB_PIN_2, ds.pwmFreq);
           }
         }
         break;
@@ -281,13 +276,15 @@ void handleInput(BalanceState* state) {
           dp.steeringBias = 0.0f;
           dp.motorFilterWeight = 1.0f;
 
-          gPwmDutyAccumulator = 0.0f;
-          gPwmDutyAppliedMagnitude = 0.0f;
-          gPwmFreq = 2 * g_update_freq;
+          ds.pwmDutyAccumulator = 0.0f;
+          ds.pwmDutyAppliedMagnitude = 0.0f;
+          ds.pwmFreq = 2 * g_update_freq;
+
           gPitchPidKp = 0.0f;
           gPitchPidKi = 0.0f;
           gPitchPidKd = 0.0f;
           gDIIRWeight = 1.0f;
+
           gVelocityDIIRWeight = 1.0f;
           gVelocityPidKp = 0.0f;
           gVelocityPidKi = 0.0f;
@@ -306,6 +303,7 @@ void handleInput(BalanceState* state) {
 void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
   unsigned int now = millis();
   auto& dp = state->driveParams;
+  auto& ds = state->driveState;
 
   static int frameCount = 0;
   static int lastFrameRate = 0;
@@ -342,10 +340,10 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
       break;
 #endif
     case ePwmMin:
-      snprintf(detailString, sizeof(detailString), "pwm=*%.0f-%.0f (%.1f)", dp.pwmMinDuty, dp.pwmMaxDuty, gPwmDutyAccumulator);
+      snprintf(detailString, sizeof(detailString), "pwm=*%.0f-%.0f (%.1f)", dp.pwmMinDuty, dp.pwmMaxDuty, ds.pwmDutyAccumulator);
       break;
     case ePwmMax:
-      snprintf(detailString, sizeof(detailString), "pwm=%.0f-*%.0f (%.1f)", dp.pwmMinDuty, dp.pwmMaxDuty, gPwmDutyAccumulator);
+      snprintf(detailString, sizeof(detailString), "pwm=%.0f-*%.0f (%.1f)", dp.pwmMinDuty, dp.pwmMaxDuty, ds.pwmDutyAccumulator);
       break;
     case eMotorSmoothing:
       snprintf(detailString, sizeof(detailString), "mSmooth: %.3f", dp.motorFilterWeight);
@@ -366,7 +364,7 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
         snprintf(detailString, sizeof(detailString), "Idle= B  / [C]");
       break;
     case ePwmFreq:
-      snprintf(detailString, sizeof(detailString), "pwmFreq=%d (%.1f)", gPwmFreq, gPwmDutyAccumulator);
+      snprintf(detailString, sizeof(detailString), "pwmFreq=%d (%.1f)", ds.pwmFreq, ds.pwmDutyAccumulator);
       break;
     case eDIIRWeight:
       snprintf(detailString, sizeof(detailString), "P_IIR: %.2f", gDIIRWeight);
@@ -411,7 +409,7 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
   static unsigned long last_title_sent_millis = 0L;
   char titleString[SCREEN_CHAR_WIDTH] = { 0 };
   static char lastTitleBuf[SCREEN_CHAR_WIDTH + 1] = {};
-  snprintf(titleString, sizeof(titleString), "Pit=%+04.1f PWM=%.1f", state->imuState.orientation.pitch, gPwmDutyAccumulator);  // lastFrameRate
+  snprintf(titleString, sizeof(titleString), "Pit=%+04.1f PWM=%.1f", state->imuState.orientation.pitch, ds.pwmDutyAccumulator);  // lastFrameRate
   if (strcmp(titleString, lastTitleBuf) || now - last_title_sent_millis > 1000) {
     remote->Send(MSGTYPE_CTL_TITLE, reinterpret_cast<const uint8_t*>(titleString), SEND_NULLTERMINATED);
     strcpy(lastTitleBuf, titleString);

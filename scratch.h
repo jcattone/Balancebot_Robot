@@ -15,7 +15,7 @@
 // TODO: Partially attenuate Angle PID Kp based on angle max IIR, allowing response
 //       to become more subtle near balance, but immediately ramp up for correction.
 //       Maybe other params are adaptive as well?
-// TODO: Auto-tune pitch trim - observe average power when gThrottleBias == 0, slowly adjust gPitchTrim to bring the averaged gPwmDutyAccumulator closer to 0
+// TODO: Auto-tune pitch trim - observe average power when gThrottleBias == 0, slowly adjust gPitchTrim to bring the averaged pwmDutyAccumulator closer to 0
 // TODO: Battery gauge: investigate BatterySense library, only sample when the motor is off, or at least not accelerating to a greater magnitude?
 // TODO: Set a battery fault if the voltage falls below a critical level
 // TODO: Use voltage sense to dynamically adjust the pwm range (at the least, the max), but use an IIR or when-motor-off sampling to avoid oscillation from motor draw

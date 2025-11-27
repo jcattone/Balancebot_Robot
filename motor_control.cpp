@@ -6,20 +6,20 @@
 
 using namespace EspNowRemote;
 
-bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp);
-bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp);
+bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds);
+bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp, DriveState& ds);
 
-void initMotors(DriveParams* params) {
+void initMotors(DriveParams* params, DriveState* state) {
   params->idleMode = eBraking;
   // The following three are floats (instead of int) to avoid runtime conversion
-  // to float when comparing to gPwmDutyAccumulator / gPwmDutyAppliedMagnitude
+  // to float when comparing to pwmDutyAccumulator / pwmDutyAppliedMagnitude
   params->deadZone = 1;
   params->pwmMinDuty = 23;
   // 160 is nominal ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
   // but a bit more oomph helps recovery
-  params->pwmMaxDuty = 240; 
+  params->pwmMaxDuty = 240;
   // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
-  params->pitchTrim = -2.8f;  
+  params->pitchTrim = -2.8f;
   // The fraction shifted from one motor to the other
   // TODO: Implement PID control for this, driven by encoder input?
   params->yawTrim = 0.0f;
@@ -28,15 +28,19 @@ void initMotors(DriveParams* params) {
   params->throttleBias = 0.0f;
   params->steeringBias = 0.0f;
 
+  state->pwmDutyAccumulator = 0.0f;       // The raw PWM target
+  state->pwmDutyAppliedMagnitude = 0.0f;  // pwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
+  state->pwmFreq = 16000;
+
   pinMode(MOTORA_PIN_1, OUTPUT);
   pinMode(MOTORA_PIN_2, OUTPUT);
   pinMode(MOTORB_PIN_1, OUTPUT);
   pinMode(MOTORB_PIN_2, OUTPUT);
 
-  analogWriteFrequency(MOTORA_PIN_1, gPwmFreq);
-  analogWriteFrequency(MOTORA_PIN_2, gPwmFreq);
-  analogWriteFrequency(MOTORB_PIN_1, gPwmFreq);
-  analogWriteFrequency(MOTORB_PIN_2, gPwmFreq);
+  analogWriteFrequency(MOTORA_PIN_1, state->pwmFreq);
+  analogWriteFrequency(MOTORA_PIN_2, state->pwmFreq);
+  analogWriteFrequency(MOTORB_PIN_1, state->pwmFreq);
+  analogWriteFrequency(MOTORB_PIN_2, state->pwmFreq);
 
   analogWriteResolution(MOTORA_PIN_1, PWM_PRECISION);  // scale all pwm output by 2^4 (16)
   analogWriteResolution(MOTORA_PIN_2, PWM_PRECISION);
@@ -77,6 +81,7 @@ void updateMotors(BalanceState* state) {
   static int startupPwmAttenuation = 0;
   unsigned long nowMs = millis();
   auto& dp = state->driveParams;
+  auto& ds = state->driveState;
 
   // ----------------------------------------
   // Perform updates every 5ms (200/sec)
@@ -127,7 +132,7 @@ void updateMotors(BalanceState* state) {
     desiredSpeedNormalized *= -1.0;
 
   float desiredPitchOut = 0.0f;
-  bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredPitchOut, dp);
+  bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredPitchOut, dp, ds);
   if (emitDiag) {
     Serial.printf("desiredSpeedNormalized   : %.1f\n", desiredSpeedNormalized);
     Serial.printf("desiredPitchOut          : %.1f\n", desiredPitchOut);
@@ -136,7 +141,7 @@ void updateMotors(BalanceState* state) {
   // The current pitch will be compared to the desired pitch setpoint to determine
   // what acceleration is necessary to achieve that pitch setpoint.
   float pidAccelOut;  // -255..255 nominal
-  bool pitchPidFault = pitchPidUpdate(state->imuState.orientation.pitch, desiredPitchOut, deltaTSec, pidAccelOut, dp);
+  bool pitchPidFault = pitchPidUpdate(state->imuState.orientation.pitch, desiredPitchOut, deltaTSec, pidAccelOut, dp, ds);
   // The acceleration is constrained to a reasonable range
   float rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
   if (emitDiag) {
@@ -170,9 +175,9 @@ void updateMotors(BalanceState* state) {
 
   // Adjust the speed by the desired relative acceleration, constraining the duty cycle to the PWM limits.
   // Note that this can be negative, to indicate a reversed direction.
-  // TODO: Permit brief excusions beyond gPwmMaxDuty (up to 255) for recovery, but trigger
+  // TODO: Permit brief excusions beyond pwmMaxDuty (up to 255) for recovery, but trigger
   //       'unsafe' if operating beyond saturation for more than briefly?)
-  //       * Split gPwmMaxDuty into soft & hard limits (default to 255?)
+  //       * Split pwmMaxDuty into soft & hard limits (default to 255?)
   //       * Maintain a 'cap' reservoir
   //       * Constrain to cap, reduce cap (decrement or decay) if > soft max
   //       * Regenerate toward hard max + delay when target is less than soft max
@@ -181,9 +186,9 @@ void updateMotors(BalanceState* state) {
   // TODO: Physical limit switches to pull DVR8833 SLEEP low if laying down (in addition to the manual switch)
   //       Similarly, use a pulldown resistor with a GPIO as an explicit enable override to avoid spurious motor
   //       activity on startup.
-  gPwmDutyAccumulator = constrain(gPwmDutyAccumulator + constrainedAccel, -dp.pwmMaxDuty, dp.pwmMaxDuty);
+  ds.pwmDutyAccumulator = constrain(ds.pwmDutyAccumulator + constrainedAccel, -dp.pwmMaxDuty, dp.pwmMaxDuty);
   if (emitDiag) {
-    Serial.printf("gPwmDutyAccumulator      : %.1f\n", gPwmDutyAccumulator);
+    Serial.printf("pwmDutyAccumulator      : %.1f\n", ds.pwmDutyAccumulator);
   }
   // An initial attempt to fix steering...
   // Nominally, steering behaves like a vehicle (i.e., the vehicle's path,
@@ -207,16 +212,16 @@ void updateMotors(BalanceState* state) {
   // TODO: Predictive window-based outlier attenuation, but otherwise allow small variations with no additional latency?
   if (dp.motorFilterWeight <= 0.999f) {
     static float motorIIR = 0.0f;
-    motorIIR = (dp.motorFilterWeight * gPwmDutyAccumulator) + (1.0f - dp.motorFilterWeight) * motorIIR;
-    gPwmDutyAccumulator = motorIIR;
+    motorIIR = (dp.motorFilterWeight * ds.pwmDutyAccumulator) + (1.0f - dp.motorFilterWeight) * motorIIR;
+    ds.pwmDutyAccumulator = motorIIR;
     if (emitDiag) {
-      Serial.printf("gPwmDutyAccumulatorSm    : %.1f\n", gPwmDutyAccumulator);
+      Serial.printf("pwmDutyAccumulatorSm    : %.1f\n", ds.pwmDutyAccumulator);
     }
   }
 
   // Apply steering and compress the output to eliminate the dead zone
-  float unsteeredDutyMagnitude = std::abs(gPwmDutyAccumulator);
-  bool isUnsteeredReversed = gPwmDutyAccumulator < 0.0f;
+  float unsteeredDutyMagnitude = std::abs(ds.pwmDutyAccumulator);
+  bool isUnsteeredReversed = ds.pwmDutyAccumulator < 0.0f;
   if (emitDiag) {
     Serial.printf("unsteeredDutyMagnitude   : %.1f\n", unsteeredDutyMagnitude);
     Serial.printf("isUnsteeredReversed      : %s\n", isUnsteeredReversed ? "true" : "false");
@@ -294,12 +299,9 @@ void updateMotors(BalanceState* state) {
   // Capture the average applied magnitude, which is used as a proxy for current speed,
   // and is required by the velocity PID for speed control.
   if (reverseA == reverseB)
-    gPwmDutyAppliedMagnitude = (unscaledPwmMagnitudeA + unscaledPwmMagnitudeB) / 2.0f;
+    ds.pwmDutyAppliedMagnitude = (unscaledPwmMagnitudeA + unscaledPwmMagnitudeB) / 2.0f;
   else
-    gPwmDutyAppliedMagnitude = abs(unscaledPwmMagnitudeA - unscaledPwmMagnitudeB) / 2.0f;
-  // if (emitDiag) {
-  //   Serial.printf("gPwmDutyAppliedMagnitude : %.1f\n", gPwmDutyAppliedMagnitude);
-  // }
+    ds.pwmDutyAppliedMagnitude = abs(unscaledPwmMagnitudeA - unscaledPwmMagnitudeB) / 2.0f;
 
   // -----------------------
   // Safety limiter
@@ -332,8 +334,8 @@ void updateMotors(BalanceState* state) {
     }
 
     // Reset a bunch of things when recovering from a fault
-    gPwmDutyAccumulator = 0.0f;
-    gPwmDutyAppliedMagnitude = 0.0f;
+    ds.pwmDutyAccumulator = 0.0f;
+    ds.pwmDutyAppliedMagnitude = 0.0f;
     startupPwmAttenuation = 0;
     dp.throttleBias = 0.0f;
     dp.steeringBias = 0.0f;
@@ -408,7 +410,7 @@ void updateMotors(BalanceState* state) {
 // That corresponds to the base (wheels) moving backwards to achieve a forward tilt.
 // Once the current angle exceeds the desired angle (), the accel switches direction,
 // seeking to drive the wheels to chase the body.
-bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp) {
+bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds) {
   // TODO: Map accel based on angle, knowing that small angles need
   // very little correction, but high angles need super-linear adjustment.
   // e.g., the accel could be proportional to cos(errorAngle),
@@ -468,7 +470,7 @@ bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, flo
   lastErrorSign = currentErrorSign;
 
   // Only accumulate error when we aren't saturated (or very near to it)
-  if (gPwmDutyAppliedMagnitude < (dp.pwmMaxDuty - 1.0f)) {
+  if (ds.pwmDutyAppliedMagnitude < (dp.pwmMaxDuty - 1.0f)) {
     errorIntegral += errorAngle * deltaTSec;
   }
 
@@ -503,19 +505,19 @@ bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, flo
 // Given a desired speed, guide the pitch.
 // If we need to speed up, lean into the appropriate direction
 // If we need to slow down, lean away from the direction of travel
-bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp) {
-  // We could look at gPwmDutyAccumulator directly, but we can disregard
+bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp, DriveState& ds) {
+  // We could look at pwmDutyAccumulator directly, but we can disregard
   // the deadzone and power scaling by deriving an effective velocity
   // from the applied magnitude relative to the scaled power range.
-  // Constrain values lower than gPwmMinDuty to be equivalent to 0.
-  // gPwmDutyAppliedMagnitude is pre-adjusted to account for the net impact of steering.
-  float currentVelocityNormalized = max(0.0f, (gPwmDutyAppliedMagnitude - dp.pwmMinDuty) / (dp.pwmMaxDuty - dp.pwmMinDuty));
+  // Constrain values lower than pwmMinDuty to be equivalent to 0.
+  // pwmDutyAppliedMagnitude is pre-adjusted to account for the net impact of steering.
+  float currentVelocityNormalized = max(0.0f, (ds.pwmDutyAppliedMagnitude - dp.pwmMinDuty) / (dp.pwmMaxDuty - dp.pwmMinDuty));
 
   // Check for out-of-bounds velocity (shouldn't happen?)
   bool velocityPidFault = currentVelocityNormalized < -0.01f || currentVelocityNormalized > 1.01f;
 
   // Apply the current direction of travel to the normalized magnitude
-  if (gPwmDutyAccumulator < 0.0f)
+  if (ds.pwmDutyAccumulator < 0.0f)
     currentVelocityNormalized *= -1.0f;
 
   // Smooth the current velocity
@@ -594,5 +596,3 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
 #endif
   return velocityPidFault;
 }
-
-

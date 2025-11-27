@@ -2,7 +2,6 @@
 #include "EspNowRemote.h"
 #include "EspNowRemote_Events.h"
 #include "types.h"
-#include "imu.h"
 //#include "motor_control.h" // caused circular inclusion
 
 // Updated by the callbacks from the remote instance
@@ -27,25 +26,39 @@ constexpr int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 extern float gAccelPeakDecay;
 #endif
 
-// DriveParams (specific to the 2-wheel main drive)
-struct DriveParams {
-  eHBridgeIdleMode idleMode;  // gHBridgeIdleMode;
-  float deadZone;             // gDeadZone;
-  float pwmMinDuty;           // gPwmMinDuty;
-  float pwmMaxDuty;           // gPwmMaxDuty;
-  float pitchTrim;            // gPitchTrim;
-  float yawTrim;              // gYawTrim;
-  float maxThrottleBias;      // gMaxThrottleBias;
-  float motorFilterWeight;    // gMotorFilter;
 
-  float throttleBias;  // gThrottleBias;
-  float steeringBias;  // gSteeringBias;
+struct ImuParams {
+  int sampleFreq;
+  float kp;
+  float ki;
+  float kiScale;
 };
 
-// DriveState
-extern float gPwmDutyAccumulator;
-extern float gPwmDutyAppliedMagnitude;
-extern int gPwmFreq;
+struct ImuState {
+  bool fault;
+  OrientationAngles orientation;
+};
+
+// DriveParams (specific to the 2-wheel main drive)
+struct DriveParams {
+  eHBridgeIdleMode idleMode;
+  float deadZone;
+  float pwmMinDuty;
+  float pwmMaxDuty;
+  float pitchTrim;
+  float yawTrim;
+  float maxThrottleBias;
+  float motorFilterWeight;
+
+  float throttleBias;
+  float steeringBias;
+};
+
+struct DriveState {
+  float pwmDutyAccumulator;      // gPwmDutyAccumulator;
+  float pwmDutyAppliedMagnitude; // gPwmDutyAppliedMagnitude;
+  int pwmFreq;                   // gPwmFreq;
+};
 
 // BatteryState
 extern float gVoltage;
@@ -69,6 +82,7 @@ struct BalanceState {
   ImuParams imuParams;
   ImuState imuState;
   DriveParams driveParams;
+  DriveState driveState;
 };
 
 // Control / interaction methods to be called from Loop()
