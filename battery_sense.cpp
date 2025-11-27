@@ -7,7 +7,7 @@ void initBatterySense() {
   pinMode(BATTERY_SENSE_PIN, INPUT);
 }
 
-void updateBatterySense() {
+void updateBatterySense(BalanceState* state) {
   unsigned long now = millis();
   static unsigned long lastSense = 0;
   static float voltageIIR = 0.0f;
@@ -33,7 +33,7 @@ void updateBatterySense() {
 
     // Auto-adjust the max throttle to limit nominal speed to a 5V average without prohibiting corrective spikes
     if (gVoltage >= 5.0f) {
-      gMaxThrottleBias = min(gPwmMaxDuty / 255.0f * 0.7f, (5.0f / gVoltage));
+      state->driveParams.maxThrottleBias = min(state->driveParams.pwmMaxDuty / 255.0f * 0.7f, (5.0f / gVoltage));
     }
   }
 }

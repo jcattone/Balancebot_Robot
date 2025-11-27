@@ -16,26 +16,11 @@ unsigned long last_hid_input_timestamp = 0;
 float gAccelPeakDecay = 0.990f;
 #endif
 
-
-eHBridgeIdleMode gHBridgeIdleMode = eBraking;
-// The following three are floats (instead of int) to avoid runtime conversion
-// to float when comparing to gPwmDutyAccumulator / gPwmDutyAppliedMagnitude
-float gDeadZone = 1;
-float gPwmMinDuty = 23;
-float gPwmMaxDuty = 240;                // 160 is nominal ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
-                                        // but a bit more oomph helps recovery
 float gPwmDutyAccumulator = 0.0f;       // The raw PWM target
 float gPwmDutyAppliedMagnitude = 0.0f;  // gPwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
 int gPwmFreq = 16000;
-float gPitchTrim = -2.8f;  // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
 
-// The fraction shifted from one motor to the other
-// TODO: Implement PID control for this, driven by encoder input?
-float gYawTrim = 0.0f;
 
-float gThrottleBias = 0.0f;
-float gSteeringBias = 0.0f;
-float gMaxThrottleBias = (160.0f / 255.0f);  // Target roughly 5V max throttle (with headroom for correction)
 
 float gVoltage = 0.0f;
 float gVoltagePercent = 0.0f;
@@ -47,7 +32,6 @@ float gVoltagePercent = 0.0f;
 float gPitchPidKp = 0.46f;
 float gPitchPidKi = 0.0f;
 float gPitchPidKd = 0.06f;
-
 float gDIIRWeight = 1.0f;
 
 float gSpeedIIRWeight = 0.020;  // Was 0.1.  .01 weights the current speed; the IIR decays to < 2% in one second
@@ -57,7 +41,6 @@ float gVelocityPidKd = 0.0f;
 float gVelocityDIIRWeight = 0.50f;
 bool gInvertVelocityPid = true;
 
-float gMotorFilter = 0.908f;
 
 bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len);
 
@@ -121,6 +104,8 @@ void handleInput(BalanceState* state) {
   //   return;
   // lastUpdate = now;
 
+  auto& dp = state->driveParams;
+
   static unsigned long last_hid_message_processed = 0;
   if (last_hid_message_processed == last_hid_input_timestamp)
     return;
@@ -129,9 +114,9 @@ void handleInput(BalanceState* state) {
   // Process joystick events if there's an unprocessed count.
   if (g_last_message_type == MSGTYPE_RMT_JOYSTICK_ANALOG) {
     // -1.0 .. +1.0
-    gSteeringBias = g_joystick_analog_state.x_axis;
+    dp.steeringBias = g_joystick_analog_state.x_axis;
     // Remap to +/- 20 degrees
-    gThrottleBias = g_joystick_analog_state.y_axis;
+    dp.throttleBias = g_joystick_analog_state.y_axis;
   } else if (g_last_message_type == MSGTYPE_RMT_JOYSTICK && g_joystick_state.count > 0) {
     // Extract the joystick state
     bool up = (g_joystick_state.joystick_direction & JOYSTICK_UP) != 0;
@@ -191,17 +176,17 @@ void handleInput(BalanceState* state) {
 #endif
       case ePitchTrim:
         if (right)
-          gPitchTrim = min(10.0f, gPitchTrim + 0.1f * count);
+          dp.pitchTrim = min(10.0f, dp.pitchTrim + 0.1f * count);
         else if (left)
-          gPitchTrim = max(-10.0f, gPitchTrim - 0.1f * count);
+          dp.pitchTrim = max(-10.0f, dp.pitchTrim - 0.1f * count);
         break;
       case ePwmMin:
-        if (right) gPwmMinDuty = min(gPwmMaxDuty, gPwmMinDuty + (float)count);
-        else if (left) gPwmMinDuty = max(0.0f, gPwmMinDuty - (float)count);
+        if (right) dp.pwmMinDuty = min(dp.pwmMaxDuty, dp.pwmMinDuty + (float)count);
+        else if (left) dp.pwmMinDuty = max(0.0f, dp.pwmMinDuty - (float)count);
         break;
       case ePwmMax:
-        if (right) gPwmMaxDuty = min(255.0f, gPwmMaxDuty + (float)count);
-        else if (left) gPwmMaxDuty = max(gPwmMinDuty, gPwmMaxDuty - (float)count);
+        if (right) dp.pwmMaxDuty = min(255.0f, dp.pwmMaxDuty + (float)count);
+        else if (left) dp.pwmMaxDuty = max(dp.pwmMinDuty, dp.pwmMaxDuty - (float)count);
         break;
       case ePwmFreq:
         {
@@ -220,9 +205,9 @@ void handleInput(BalanceState* state) {
         break;
       case eMotorSmoothing:
         if (right)
-          gMotorFilter = min(1.0f, gMotorFilter + 0.001f * count);
+          dp.motorFilterWeight = min(1.0f, dp.motorFilterWeight + 0.001f * count);
         else if (left)
-          gMotorFilter = max(0.0f, gMotorFilter - 0.001f * count);
+          dp.motorFilterWeight = max(0.0f, dp.motorFilterWeight - 0.001f * count);
         break;
       case eDIIRWeight:
         if (right)
@@ -244,21 +229,21 @@ void handleInput(BalanceState* state) {
         break;
       case eMaxThrottle:
         if (right)
-          gMaxThrottleBias = min(1.0f, gMaxThrottleBias + 0.01f * count);
+          dp.maxThrottleBias = min(1.0f, dp.maxThrottleBias + 0.01f * count);
         else if (left)
-          gMaxThrottleBias = max(0.0f, gMaxThrottleBias - 0.01f * count);
+          dp.maxThrottleBias = max(0.0f, dp.maxThrottleBias - 0.01f * count);
         break;
       case eDeadzone:
         if (right)
-          gDeadZone = min(255.0f, gDeadZone + (float)count);
+          dp.deadZone = min(255.0f, dp.deadZone + (float)count);
         else if (left)
-          gDeadZone = max(0.0f, gDeadZone - (float)count);
+          dp.deadZone = max(0.0f, dp.deadZone - (float)count);
         break;
       case eHBridgeIdle:
         if (right)
-          gHBridgeIdleMode = eCoasting;
+          dp.idleMode = eCoasting;
         else if (left)
-          gHBridgeIdleMode = eBraking;
+          dp.idleMode = eBraking;
         break;
       case ePitchPidKp:
         adjustPidK(&gPitchPidKp, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
@@ -286,21 +271,22 @@ void handleInput(BalanceState* state) {
         break;
       case eReset:
         if (count > 5) {
-          gHBridgeIdleMode = eBraking;
-          gDeadZone = 1;
-          gPwmMinDuty = 23;
-          gPwmMaxDuty = 200;
+          dp.idleMode = eBraking;
+          dp.deadZone = 1;
+          dp.pwmMinDuty = 23;
+          dp.pwmMaxDuty = 200;
+          dp.pitchTrim = -2.6f;
+          dp.yawTrim = 0.0f;
+          dp.throttleBias = 0.0f;
+          dp.steeringBias = 0.0f;
+          dp.motorFilterWeight = 1.0f;
+
           gPwmDutyAccumulator = 0.0f;
           gPwmDutyAppliedMagnitude = 0.0f;
           gPwmFreq = 2 * g_update_freq;
-          gPitchTrim = -2.6f;
-          gYawTrim = 0.0f;
-          gThrottleBias = 0.0f;
-          gSteeringBias = 0.0f;
           gPitchPidKp = 0.0f;
           gPitchPidKi = 0.0f;
           gPitchPidKd = 0.0f;
-          gMotorFilter = 1.0f;
           gDIIRWeight = 1.0f;
           gVelocityDIIRWeight = 1.0f;
           gVelocityPidKp = 0.0f;
@@ -319,6 +305,7 @@ void handleInput(BalanceState* state) {
 // TODO: ABort immediately if not connected, and always update when reconnected
 void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
   unsigned int now = millis();
+  auto& dp = state->driveParams;
 
   static int frameCount = 0;
   static int lastFrameRate = 0;
@@ -355,19 +342,31 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
       break;
 #endif
     case ePwmMin:
-      snprintf(detailString, sizeof(detailString), "pwm=*%.0f-%.0f (%.1f)", gPwmMinDuty, gPwmMaxDuty, gPwmDutyAccumulator);
+      snprintf(detailString, sizeof(detailString), "pwm=*%.0f-%.0f (%.1f)", dp.pwmMinDuty, dp.pwmMaxDuty, gPwmDutyAccumulator);
       break;
     case ePwmMax:
-      snprintf(detailString, sizeof(detailString), "pwm=%.0f-*%.0f (%.1f)", gPwmMinDuty, gPwmMaxDuty, gPwmDutyAccumulator);
+      snprintf(detailString, sizeof(detailString), "pwm=%.0f-*%.0f (%.1f)", dp.pwmMinDuty, dp.pwmMaxDuty, gPwmDutyAccumulator);
+      break;
+    case eMotorSmoothing:
+      snprintf(detailString, sizeof(detailString), "mSmooth: %.3f", dp.motorFilterWeight);
+      break;
+    case ePitchTrim:
+      snprintf(detailString, sizeof(detailString), "Trim: %.2f", dp.pitchTrim);
+      break;
+    case eMaxThrottle:
+      snprintf(detailString, sizeof(detailString), "Throttle: %.0f%%", dp.maxThrottleBias * 100.0f);
+      break;
+    case eDeadzone:
+      snprintf(detailString, sizeof(detailString), "mDead: %.0f", dp.deadZone);
+      break;
+    case eHBridgeIdle:
+      if (dp.idleMode == eBraking)
+        snprintf(detailString, sizeof(detailString), "Idle=[B] /  C ");
+      else
+        snprintf(detailString, sizeof(detailString), "Idle= B  / [C]");
       break;
     case ePwmFreq:
       snprintf(detailString, sizeof(detailString), "pwmFreq=%d (%.1f)", gPwmFreq, gPwmDutyAccumulator);
-      break;
-    case eMotorSmoothing:
-      snprintf(detailString, sizeof(detailString), "mSmooth: %.3f", gMotorFilter);
-      break;
-    case ePitchTrim:
-      snprintf(detailString, sizeof(detailString), "Trim: %.2f", gPitchTrim);
       break;
     case eDIIRWeight:
       snprintf(detailString, sizeof(detailString), "P_IIR: %.2f", gDIIRWeight);
@@ -377,18 +376,6 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
       break;
     case eVelocityCurSpeedIIRWeight:
       snprintf(detailString, sizeof(detailString), "SP_IIR: %.3f", gSpeedIIRWeight);
-      break;
-    case eMaxThrottle:
-      snprintf(detailString, sizeof(detailString), "Throttle: %.0f%%", gMaxThrottleBias * 100.0f);
-      break;
-    case eDeadzone:
-      snprintf(detailString, sizeof(detailString), "mDead: %.0f", gDeadZone);
-      break;
-    case eHBridgeIdle:
-      if (gHBridgeIdleMode == eBraking)
-        snprintf(detailString, sizeof(detailString), "Idle=[B] /  C ");
-      else
-        snprintf(detailString, sizeof(detailString), "Idle= B  / [C]");
       break;
     case ePitchPidKp:
       snprintf(detailString, sizeof(detailString), "pPID *%.2f %.2f %.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);

@@ -37,7 +37,7 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
 
   initBatterySense();
-  initMotors();
+  initMotors(&state.driveParams);
   initImu(&state.imuParams);
   initInput(remote);
 
@@ -61,7 +61,7 @@ void loop() {
     updateOrientation(&state.imuParams, &state.imuState);
     // updateBattery and updateRemoteDisplay are not as time-sensitive, and are
     // internally throttled to run less frequently than the main control functions
-    updateBatterySense();
+    updateBatterySense(&state);
     updateRemoteDisplay(remote, &state);
 
     updateMotors(&state);
