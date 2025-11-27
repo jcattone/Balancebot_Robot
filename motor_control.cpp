@@ -1,6 +1,6 @@
 #include "motor_control.h"
 
-#include "Types.h"
+#include "types.h"
 #include "tuning.h"
 #include "pins.h"
 

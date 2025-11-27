@@ -1,7 +1,7 @@
 #pragma once
 #include "EspNowRemote.h"
 #include "EspNowRemote_Events.h"
-#include "Types.h"
+#include "types.h"
 
 // Updated by the callbacks from the remote instance
 extern EspNowRemote::joystick_state_t g_joystick_state;
