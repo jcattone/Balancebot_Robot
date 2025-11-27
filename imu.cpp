@@ -9,25 +9,47 @@
 // Other algos (Madgwick, NXP) were difficult to tune, and were not delivering better data
 // for the purpose of a balance bot
 #include "Adafruit_AHRS_Mahony.h"
-
-
 #include "types.h"
-#include "tuning.h"
 #include "pins.h"
 #include "imu.h"
+#include "tuning.h"
 
 Adafruit_MPU6050 mpu;
 Adafruit_Mahony filter{};  // ...(float prop_gain, float int_gain) // Kp (was 16-ish), Ki
 
-void initImu() {
+void initImu(ImuParams* params) {
   if (!mpu.begin()) {
     Serial.println("MPU-6050 init failed");
     while (1)
       yield();
   }
 
+  // Initialize the IMU filter weights:
+  // Kp ~= trust accel data (gravity vector) to correct gyro drift
+  //   High Kp = correct quickly, but linear acceleration (i.e., translation) can be misread as orientation change
+  //   Low Kp = trust the gyro more, can be sluggish to respond
+  //   i.e., choose lowest Kp with acceptable linear acceleration characteristics
+  // Ki ~= correction speed for gyro bias (from accel gravity reference)
+  //   High Ki = aggressively remove bias, but can become sluggish.  In practice, overshoot is observed.
+  //   Low Ki = may allow bias to persistently affect the output
+  // In practice, I'm seeing eyeball-reasonable results with Kp=10..25, and Ki=0..5
+  //   (10.0 & 3.0 seems fastish and low noise)
+  //   (32/2 seems snappy)
+  // Theory-to-practice...
+  //   The jumpiness was indeed exacerbated by a high IMU Kp, presumably
+  //   by allowing large pitch deltas due to linear acceleration.
+  //   By reducing Kp, we work more from the integrated gyro
+  //   (i.e., integrated rotation delta), rather than from the
+  //   accel (gravity) data, which is perturbed by linear motion.
+  //   A small Ki weight still corrects integration error from the
+  //   accel (gravity) vector.
+  params->sampleFreq = g_sample_freq;
+  params->kp = 3.7f;
+  params->ki = 0.3f;
+  params->kiScale = 1.0f;
+
   // Param: samples per second
-  filter.begin(g_sample_freq);
+  filter.begin(params->sampleFreq);
   // THen:
   // filter.updateIMU(gx/y/z, ax/y/z, [optional dT]) // DPS (deg. per sec) / Gs
   // getRoll/Pitch/Yaw(), getGravityVector()
@@ -35,7 +57,7 @@ void initImu() {
 }
 
 
-void updateOrientation() {
+void updateOrientation(ImuParams* params, ImuState* state) {
   // static unsigned long lastUpdate = 0;
   // unsigned int now = millis();
   // // Target 100 Hz, coordinated with the rate we provided to filter.begin()
@@ -49,14 +71,14 @@ void updateOrientation() {
   // Get the gyro (turn rate) in radians-per-second
   mpu.getEvent(&a, &g, &temp);
   if (!std::isfinite(g.gyro.x) || !std::isfinite(g.gyro.y) || !std::isfinite(g.gyro.z) || !std::isfinite(a.acceleration.x) || !std::isfinite(a.acceleration.y) || !std::isfinite(a.acceleration.z)) {
-    gImuFault = true;
+    state->fault = true;
     return;
   }
-  gImuFault = false;
+  state->fault = false;
 
   // Update in degrees-per-second and gravities
-  filter.setKp(gMahonyKp);
-  filter.setKi(gMahonyKi * gMahonyKiScale);
+  filter.setKp(params->kp);
+  filter.setKi(params->ki * params->kiScale);
   filter.update(
     // From radians-per-second to degrees-per-second
     g.gyro.x * 180.0f / M_PI,
@@ -75,7 +97,7 @@ void updateOrientation() {
   // dT is measures in seconds (i.e., nominally .01 @ 100Hz)
   // TODO: Send loops/sec to the remote
 
-  gOrientation.roll = filter.getRoll();
-  gOrientation.pitch = filter.getPitch();
-  gOrientation.yaw = filter.getYaw();
+  state->orientation.roll = filter.getRoll();
+  state->orientation.pitch = filter.getPitch();
+  state->orientation.yaw = filter.getYaw();
 }

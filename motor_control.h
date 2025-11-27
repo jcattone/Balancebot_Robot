@@ -1,4 +1,5 @@
 #pragma once
+#include "tuning.h"
 
 void initMotors();
-void updateMotors();
+void updateMotors(BalanceState* state);

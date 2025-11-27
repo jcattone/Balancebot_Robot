@@ -10,37 +10,11 @@ joystick_state_t g_joystick_state = {};
 joystick_analog_state_t g_joystick_analog_state = {};
 uint8_t g_last_message_type = MSGTYPE_UNKNOWN;
 
-OrientationAngles gOrientation;
-
 unsigned long last_hid_input_timestamp = 0;
 
-bool gImuFault = false;
-
-// Initialize the IMU filter weights:
-// Kp ~= trust accel data (gravity vector) to correct gyro drift
-//   High Kp = correct quickly, but linear acceleration (i.e., translation) can be misread as orientation change
-//   Low Kp = trust the gyro more, can be sluggish to respond
-//   i.e., choose lowest Kp with acceptable linear acceleration characteristics
-// Ki ~= correction speed for gyro bias (from accel gravity reference)
-//   High Ki = aggressively remove bias, but can become sluggish.  In practice, overshoot is observed.
-//   Low Ki = may allow bias to persistently affect the output
-// In practice, I'm seeing eyeball-reasonable results with Kp=10..25, and Ki=0..5
-//   (10.0 & 3.0 seems fastish and low noise)
-//   (32/2 seems snappy)
-// Theory-to-practice...
-//   The jumpiness was indeed exacerbated by a high IMU Kp, presumably
-//   by allowing large pitch deltas due to linear acceleration.
-//   By reducing Kp, we work more from the integrated gyro
-//   (i.e., integrated rotation delta), rather than from the
-//   accel (gravity) data, which is perturbed by linear motion.
-//   A small Ki weight still corrects integration error from the
-//   accel (gravity) vector.
-float gMahonyKp = 3.7f;
-float gMahonyKi = 0.3f;
 #ifdef ADAPTIVE_FUSION_KI
 float gAccelPeakDecay = 0.990f;
 #endif
-float gMahonyKiScale = 1.0f;
 
 
 eHBridgeIdleMode gHBridgeIdleMode = eBraking;
@@ -92,13 +66,13 @@ void initInput(EspNowRemote::RmtBase* newRemote) {
   // Instead, explicitly capture the remote in the parent scope.
   static EspNowRemote::RmtBase* capturedRemote;
   capturedRemote = newRemote;
-  
+
   // Forward esp wifi events to the remote
   esp_now_register_send_cb([](const esp_now_send_info_t* tx_info, esp_now_send_status_t send_status) {
     capturedRemote->HandleDataSent(tx_info, send_status);
   });
   esp_now_register_recv_cb([](const esp_now_recv_info_t* esp_now_info, const uint8_t* data, int data_len) IRAM_ATTR {
-      capturedRemote->HandleDataReceived(esp_now_info, data, data_len);
+    capturedRemote->HandleDataReceived(esp_now_info, data, data_len);
   });
 
   capturedRemote->Setup();
@@ -138,8 +112,8 @@ void adjustPidK(float* f, float delta) {
   if (*f < 0.0f)
     *f = 0.0f;
 }
-#define SCREEN_CHAR_WIDTH 21 // 5+1 pixel font width
-void handleInput() {
+#define SCREEN_CHAR_WIDTH 21  // 5+1 pixel font width
+void handleInput(BalanceState* state) {
   static unsigned long lastUpdate = 0;
   static bool suppressModeChange = false;
   // unsigned int now = millis();
@@ -196,13 +170,19 @@ void handleInput() {
     // Right/left apply a change to the current mode, scaled by the count when applicable.
     switch (gCurrentConfigMode) {
       case eFusionKp:
-        if (right) gMahonyKp = min(100.0f, gMahonyKp + 0.1f * count);
-        else if (left) gMahonyKp = max(0.0f, gMahonyKp - 0.1f * count);
-        break;
+        {
+          auto& kp = state->imuParams.kp;
+          if (right) kp = min(100.0f, kp + 0.1f * count);
+          else if (left) kp = max(0.0f, kp - 0.1f * count);
+          break;
+        }
       case eFusionKi:
-        if (right) gMahonyKi = min(100.0f, gMahonyKi + 0.01f * count);
-        else if (left) gMahonyKi = max(0.0f, gMahonyKi - 0.01f * count);
-        break;
+        {
+          auto& ki = state->imuParams.ki;
+          if (right) ki = min(100.0f, ki + 0.01f * count);
+          else if (left) ki = max(0.0f, ki - 0.01f * count);
+          break;
+        }
 #ifdef ADAPTIVE_FUSION_KI
       case eAccelPeakDecay:
         if (right) gAccelPeakDecay = min(1.0f, gAccelPeakDecay + 0.001f * count);
@@ -337,7 +317,7 @@ void handleInput() {
 
 
 // TODO: ABort immediately if not connected, and always update when reconnected
-void updateRemoteDisplay(RmtBase* remote) {
+void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
   unsigned int now = millis();
 
   static int frameCount = 0;
@@ -361,13 +341,13 @@ void updateRemoteDisplay(RmtBase* remote) {
       snprintf(detailString, sizeof(detailString), "Reset (hold)");
       break;
     case eIMUDisplay:
-      snprintf(detailString, sizeof(detailString), "IMU: R%+04.1f P%+04.1f", gOrientation.roll, gOrientation.pitch);
+      snprintf(detailString, sizeof(detailString), "IMU: R%+04.1f P%+04.1f", state->imuState.orientation.roll, state->imuState.orientation.pitch);
       break;
     case eFusionKp:
-      snprintf(detailString, sizeof(detailString), "Kp=*%.1f Ki=%.2f", gMahonyKp, gMahonyKi);
+      snprintf(detailString, sizeof(detailString), "Kp=*%.1f Ki=%.2f", state->imuParams.kp, state->imuParams.ki);
       break;
     case eFusionKi:
-      snprintf(detailString, sizeof(detailString), "Kp=%.1f Ki=*%.2f", gMahonyKp, gMahonyKi);
+      snprintf(detailString, sizeof(detailString), "Kp=%.1f Ki=*%.2f", state->imuParams.kp, state->imuParams.ki);
       break;
 #ifdef ADAPTIVE_FUSION_KI
     case eAccelPeakDecay:
@@ -444,7 +424,7 @@ void updateRemoteDisplay(RmtBase* remote) {
   static unsigned long last_title_sent_millis = 0L;
   char titleString[SCREEN_CHAR_WIDTH] = { 0 };
   static char lastTitleBuf[SCREEN_CHAR_WIDTH + 1] = {};
-  snprintf(titleString, sizeof(titleString), "Pit=%+04.1f PWM=%.1f", gOrientation.pitch, gPwmDutyAccumulator);  // lastFrameRate
+  snprintf(titleString, sizeof(titleString), "Pit=%+04.1f PWM=%.1f", state->imuState.orientation.pitch, gPwmDutyAccumulator);  // lastFrameRate
   if (strcmp(titleString, lastTitleBuf) || now - last_title_sent_millis > 1000) {
     remote->Send(MSGTYPE_CTL_TITLE, reinterpret_cast<const uint8_t*>(titleString), SEND_NULLTERMINATED);
     strcpy(lastTitleBuf, titleString);

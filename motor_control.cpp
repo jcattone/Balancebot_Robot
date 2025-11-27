@@ -6,7 +6,7 @@
 
 using namespace EspNowRemote;
 
-bool pitchPidUpdate(float desiredAngle, float deltaTSec, float& accelOut);
+bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut);
 bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget);
 
 void initMotors() {
@@ -55,7 +55,7 @@ void initMotors() {
 //     Why isn't the velocity pid countering lingering duty w/ counter-tilt?
 //   * Sometimes, a large change of angle runs away rapidly.  Seems like pitch
 //     pid not responding rapidly enough.  Fusion / IMU issue (Kp/Ki)?
-void updateMotors() {
+void updateMotors(BalanceState* state) {
   static int startupPwmAttenuation = 0;
   unsigned long nowMs = millis();
 
@@ -117,7 +117,7 @@ void updateMotors() {
   // The current pitch will be compared to the desired pitch setpoint to determine
   // what acceleration is necessary to achieve that pitch setpoint.
   float pidAccelOut;  // -255..255 nominal
-  bool pitchPidFault = pitchPidUpdate(desiredPitchOut, deltaTSec, pidAccelOut);
+  bool pitchPidFault = pitchPidUpdate(state->imuState.orientation.pitch, desiredPitchOut, deltaTSec, pidAccelOut);
   // The acceleration is constrained to a reasonable range
   float rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
   if (emitDiag) {
@@ -143,7 +143,7 @@ void updateMotors() {
   // but increasing side-to-side accel).
   static float normalizedAccelMagPeak = 0.0f;
   normalizedAccelMagPeak = std::max(gAccelPeakDecay * normalizedAccelMagPeak, std::abs(constrainedAccel) / 255.0f);
-  gMahonyKiScale = 1.0f - normalizedAccelMagPeak;
+  state->imuParams.kiScale = 1.0f - normalizedAccelMagPeak;
 #endif
 
   // ----------------------------------
@@ -291,7 +291,7 @@ void updateMotors() {
   static unsigned long anyFaultTimeMs = 0;
   static bool anyFault = false;
   bool wasPidFault = anyFault;
-  anyFault = velocityPidFault || pitchPidFault || gImuFault;
+  anyFault = velocityPidFault || pitchPidFault || state->imuState.fault;
   if (anyFault && !wasPidFault) {
     if (velocityPidFault)
       Serial.println("Velocity Fault!");
@@ -389,7 +389,7 @@ void updateMotors() {
 // That corresponds to the base (wheels) moving backwards to achieve a forward tilt.
 // Once the current angle exceeds the desired angle (), the accel switches direction,
 // seeking to drive the wheels to chase the body.
-bool pitchPidUpdate(float desiredAngle, float deltaTSec, float& accelOut) {
+bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut) {
   // TODO: Map accel based on angle, knowing that small angles need
   // very little correction, but high angles need super-linear adjustment.
   // e.g., the accel could be proportional to cos(errorAngle),
@@ -398,7 +398,7 @@ bool pitchPidUpdate(float desiredAngle, float deltaTSec, float& accelOut) {
   // PID per-update inputs
   // gPitchTrim shifts the reported angle to a 'true' angle.
   // [-90, -90] generally speaking (pitch decreases after 90 for some reason?)
-  float currentAngle = gOrientation.pitch - gPitchTrim;
+  float currentAngle = currentPitch - gPitchTrim;
 
   // --------------------------------------
   // Pitch-driven fault detection with hysteresis

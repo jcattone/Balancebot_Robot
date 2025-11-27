@@ -1,8 +1,6 @@
 #pragma once
 #include <Arduino.h>
 
-
-// With each update, the orientation will be captured in gOrientation
 struct OrientationAngles {
   float pitch;
   float roll;

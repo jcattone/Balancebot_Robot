@@ -2,6 +2,7 @@
 #include "EspNowRemote.h"
 #include "EspNowRemote_Events.h"
 #include "types.h"
+#include "imu.h"
 
 // Updated by the callbacks from the remote instance
 extern EspNowRemote::joystick_state_t g_joystick_state;
@@ -9,8 +10,6 @@ extern EspNowRemote::joystick_analog_state_t g_joystick_analog_state;
 extern uint8_t g_last_message_type;
 extern unsigned long last_hid_input_timestamp;
 
-// Updated by updateOrientation()
-extern OrientationAngles gOrientation;
 
 // How often do the control functions run?
 constexpr int g_sample_freq = 200;  // Hz
@@ -23,13 +22,10 @@ constexpr int PWM_MAX = ((1 << PWM_PRECISION) - 1);
 constexpr int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 
 // Tuning parameters
-extern bool gImuFault;
-extern float gMahonyKp;
-extern float gMahonyKi;
 #ifdef ADAPTIVE_FUSION_KI
 extern float gAccelPeakDecay;
 #endif
-extern float gMahonyKiScale;
+
 extern eHBridgeIdleMode gHBridgeIdleMode;
 extern float gDeadZone;
 extern float gPwmMinDuty;
@@ -56,7 +52,12 @@ extern float gVelocityDIIRWeight;
 extern bool gInvertVelocityPid;
 extern float gMotorFilter;
 
+struct BalanceState {
+  ImuParams imuParams;
+  ImuState imuState;
+};
+
 // Control / interaction methods to be called from Loop()
 void initInput(EspNowRemote::RmtBase* remote);
-void handleInput();
-void updateRemoteDisplay(EspNowRemote::RmtBase* remote);
+void handleInput(BalanceState* state);
+void updateRemoteDisplay(EspNowRemote::RmtBase* remote, BalanceState* state);

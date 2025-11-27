@@ -16,6 +16,8 @@
 using namespace EspNowRemote;
 RmtBase* remote = EspNowRemote::MakeController();
 
+BalanceState state {};
+
 void setup() {
   Serial.begin(115200);
 
@@ -36,7 +38,7 @@ void setup() {
 
   initBatterySense();
   initMotors();
-  initImu();
+  initImu(&state.imuParams);
   initInput(remote);
 
 }
@@ -47,7 +49,7 @@ void loop() {
 
   // Handle input events as they occur, but most effects won't 
   // take effect unil the next control loop below.
-  handleInput();
+  handleInput(&state);
 
   // To ensure that the motor updates are always working with the freshest data possible,
   // externally synchronize updateOrientation and updateMotors.
@@ -56,13 +58,13 @@ void loop() {
   if (now - lastUpdate >= g_sample_period) {
     lastUpdate = now;
 
-    updateOrientation();
+    updateOrientation(&state.imuParams, &state.imuState);
     // updateBattery and updateRemoteDisplay are not as time-sensitive, and are
     // internally throttled to run less frequently than the main control functions
     updateBatterySense();
-    updateRemoteDisplay(remote);
+    updateRemoteDisplay(remote, &state);
 
-    updateMotors();
+    updateMotors(&state);
   }
 }
 
