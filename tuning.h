@@ -57,5 +57,6 @@ extern bool gInvertVelocityPid;
 extern float gMotorFilter;
 
 // Control / interaction methods to be called from Loop()
+void initInput(EspNowRemote::RmtBase* remote);
 void handleInput();
 void updateRemoteDisplay(EspNowRemote::RmtBase* remote);

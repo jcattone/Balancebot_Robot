@@ -85,6 +85,54 @@ bool gInvertVelocityPid = true;
 
 float gMotorFilter = 0.908f;
 
+bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len);
+
+void initInput(EspNowRemote::RmtBase* newRemote) {
+  // To use lambdas as callbacks, we can't use a capture expression.
+  // Instead, explicitly capture the remote in the parent scope.
+  static EspNowRemote::RmtBase* capturedRemote;
+  capturedRemote = newRemote;
+  
+  // Forward esp wifi events to the remote
+  esp_now_register_send_cb([](const esp_now_send_info_t* tx_info, esp_now_send_status_t send_status) {
+    capturedRemote->HandleDataSent(tx_info, send_status);
+  });
+  esp_now_register_recv_cb([](const esp_now_recv_info_t* esp_now_info, const uint8_t* data, int data_len) IRAM_ATTR {
+      capturedRemote->HandleDataReceived(esp_now_info, data, data_len);
+  });
+
+  capturedRemote->Setup();
+  capturedRemote->RegisterMsgHandler(OnControllerMessage);
+  capturedRemote->Start();
+}
+
+// When the remote controller wants to raise a message, it will be published here.
+bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len) {
+  switch (msg_type) {
+    case EspNowRemote::MSGTYPE_SELF_STATUS:
+      // Loopback status from the local remote instance... not from the controller.
+      // memcpy(textBuffer[1], data, data_len);
+      // textBuffer[1][data_len] = 0;
+#ifdef SERIAL_DIAG
+      Serial.println((const char*)data);
+#endif
+      break;
+
+    case MSGTYPE_RMT_JOYSTICK:
+      memcpy(&g_joystick_state, data, data_len);
+      g_last_message_type = msg_type;
+      last_hid_input_timestamp = micros();
+      break;
+
+    case MSGTYPE_RMT_JOYSTICK_ANALOG:
+      memcpy(&g_joystick_analog_state, data, data_len);
+      g_last_message_type = msg_type;
+      last_hid_input_timestamp = micros();
+      break;
+  }
+  return true;
+}
+
 void adjustPidK(float* f, float delta) {
   *f += delta;
   if (*f < 0.0f)
