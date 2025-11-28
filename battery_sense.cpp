@@ -3,7 +3,9 @@
 #include "pins.h"
 #include "battery_sense.h"
 
-void initBatterySense() {
+void initBatterySense(BalanceState* state) {
+  state->batteryState.voltage = 0.0f;
+  state->batteryState.voltagePercent = 0.0f;
   pinMode(BATTERY_SENSE_PIN, INPUT);
 }
 
@@ -26,14 +28,14 @@ void updateBatterySense(BalanceState* state) {
       voltageIIR = currentVoltage;
     else
       voltageIIR = 0.001 * currentVoltage + 0.999 * voltageIIR;
-    gVoltage = voltageIIR;
+    state->batteryState.voltage = voltageIIR;
     const float lowLevel = 2 * 3.4f;
     const float highLevel = 2 * 4.2f;
-    gVoltagePercent = max(0.0f, (gVoltage - lowLevel) / (highLevel - lowLevel) * 100.0f);
+    state->batteryState.voltagePercent = max(0.0f, (state->batteryState.voltage - lowLevel) / (highLevel - lowLevel) * 100.0f);
 
     // Auto-adjust the max throttle to limit nominal speed to a 5V average without prohibiting corrective spikes
-    if (gVoltage >= 5.0f) {
-      state->driveParams.maxThrottleBias = min(state->driveParams.pwmMaxDuty / 255.0f * 0.7f, (5.0f / gVoltage));
+    if (state->batteryState.voltage >= 5.0f) {
+      state->driveParams.maxThrottleBias = min(state->driveParams.pwmMaxDuty / 255.0f * 0.7f, (5.0f / state->batteryState.voltage));
     }
   }
 }

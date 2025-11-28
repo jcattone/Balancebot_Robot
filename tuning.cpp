@@ -16,10 +16,6 @@ unsigned long last_hid_input_timestamp = 0;
 float gAccelPeakDecay = 0.990f;
 #endif
 
-float gVoltage = 0.0f;
-float gVoltagePercent = 0.0f;
-
-
 bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len);
 
 void initInput(EspNowRemote::RmtBase* newRemote) {
@@ -387,7 +383,7 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
         snprintf(detailString, sizeof(detailString), "-VelPID=[N] /  Y ");
       break;
     case eBattery:
-      snprintf(detailString, sizeof(detailString), "Batt: %.2f (%.0f%%)", gVoltage, gVoltagePercent);
+      snprintf(detailString, sizeof(detailString), "Batt: %.2f (%.0f%%)", state->batteryState.voltage, state->batteryState.voltagePercent);
       break;
   }
 

@@ -60,10 +60,6 @@ struct DriveState {
   int pwmFreq;                    // gPwmFreq;
 };
 
-// BatteryState
-extern float gVoltage;
-extern float gVoltagePercent;
-
 // Originally: pitch 0.3/0/0.05 (IIR .16), vel 0.14/0/0 (IIR .8) w/ intrinsic 60x
 struct PitchPIDParams {
   float kp;          // gPitchPidKp = 0.46f;
@@ -81,6 +77,11 @@ struct VelocityPIDParams {
   bool invertFeedback;
 };
 
+struct BatteryState {
+  float voltage;
+  float voltagePercent;
+};
+
 struct BalanceState {
   ImuParams imuParams;
   ImuState imuState;
@@ -88,6 +89,7 @@ struct BalanceState {
   DriveState driveState;
   PitchPIDParams pitchPidParams;
   VelocityPIDParams velocityPidParams;
+  BatteryState batteryState;
 };
 
 // Control / interaction methods to be called from Loop()
