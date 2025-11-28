@@ -9,7 +9,12 @@ using namespace EspNowRemote;
 bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds, PitchPIDParams& pp);
 bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp, DriveState& ds, VelocityPIDParams& vp);
 
-void initMotors(DriveParams* driveParams, DriveState* driveState, PitchPIDParams* pitchParams, VelocityPIDParams* velocityParams) {
+void initMotors(BalanceState* state) {
+  DriveParams* driveParams = &state->driveParams;
+  DriveState* driveState = &state->driveState;
+  PitchPIDParams* pitchParams = &state->pitchPidParams;
+  VelocityPIDParams* velocityParams = &state->velocityPidParams;
+
   driveParams->idleMode = eBraking;
   // The following three are floats (instead of int) to avoid runtime conversion
   // to float when comparing to pwmDutyAccumulator / pwmDutyAppliedMagnitude

@@ -82,13 +82,16 @@ struct BatteryState {
   float voltagePercent;
 };
 
+// TODO: Split into IMUState, MotorState, and BatteryState, as we may want to swap motor configs without swapping the others?
 struct BalanceState {
   ImuParams imuParams;
   ImuState imuState;
+
   DriveParams driveParams;
   DriveState driveState;
   PitchPIDParams pitchPidParams;
   VelocityPIDParams velocityPidParams;
+
   BatteryState batteryState;
 };
 
