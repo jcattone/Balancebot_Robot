@@ -70,7 +70,7 @@ void adjustPidK(float* f, float delta) {
     *f = 0.0f;
 }
 #define SCREEN_CHAR_WIDTH 21  // 5+1 pixel font width
-void handleInput(BalanceState* state) {
+void handleInput(MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
   static unsigned long lastUpdate = 0;
   static bool suppressModeChange = false;
   // unsigned int now = millis();
@@ -78,10 +78,10 @@ void handleInput(BalanceState* state) {
   //   return;
   // lastUpdate = now;
 
-  auto& dp = state->driveParams;
-  auto& ds = state->driveState;
-  auto& pp = state->pitchPidParams;
-  auto& vp = state->velocityPidParams;
+  auto& dp = motor->driveParams;
+  auto& ds = motor->driveState;
+  auto& pp = motor->pitchPidParams;
+  auto& vp = motor->velocityPidParams;
 
   static unsigned long last_hid_message_processed = 0;
   if (last_hid_message_processed == last_hid_input_timestamp)
@@ -133,14 +133,14 @@ void handleInput(BalanceState* state) {
     switch (gCurrentConfigMode) {
       case eFusionKp:
         {
-          auto& kp = state->imuParams.kp;
+          auto& kp = imu->params.kp;
           if (right) kp = min(100.0f, kp + 0.1f * count);
           else if (left) kp = max(0.0f, kp - 0.1f * count);
           break;
         }
       case eFusionKi:
         {
-          auto& ki = state->imuParams.ki;
+          auto& ki = imu->params.ki;
           if (right) ki = min(100.0f, ki + 0.01f * count);
           else if (left) ki = max(0.0f, ki - 0.01f * count);
           break;
@@ -281,12 +281,12 @@ void handleInput(BalanceState* state) {
 }
 
 // TODO: Abort immediately if not connected, and always update when reconnected
-void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
+void updateRemoteDisplay(RmtBase* remote, MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
   unsigned int now = millis();
-  auto& dp = state->driveParams;
-  auto& ds = state->driveState;
-  auto& pp = state->pitchPidParams;
-  auto& vp = state->velocityPidParams;
+  auto& dp = motor->driveParams;
+  auto& ds = motor->driveState;
+  auto& pp = motor->pitchPidParams;
+  auto& vp = motor->velocityPidParams;
 
   static int frameCount = 0;
   static int lastFrameRate = 0;
@@ -309,13 +309,13 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
       snprintf(detailString, sizeof(detailString), "Reset (hold)");
       break;
     case eIMUDisplay:
-      snprintf(detailString, sizeof(detailString), "IMU: R%+04.1f P%+04.1f", state->imuState.orientation.roll, state->imuState.orientation.pitch);
+      snprintf(detailString, sizeof(detailString), "IMU: R%+04.1f P%+04.1f", imu->state.orientation.roll, imu->state.orientation.pitch);
       break;
     case eFusionKp:
-      snprintf(detailString, sizeof(detailString), "Kp=*%.1f Ki=%.2f", state->imuParams.kp, state->imuParams.ki);
+      snprintf(detailString, sizeof(detailString), "Kp=*%.1f Ki=%.2f", imu->params.kp, imu->params.ki);
       break;
     case eFusionKi:
-      snprintf(detailString, sizeof(detailString), "Kp=%.1f Ki=*%.2f", state->imuParams.kp, state->imuParams.ki);
+      snprintf(detailString, sizeof(detailString), "Kp=%.1f Ki=*%.2f", imu->params.kp, imu->params.ki);
       break;
 #ifdef ADAPTIVE_FUSION_KI
     case eAccelPeakDecay:
@@ -383,7 +383,7 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
         snprintf(detailString, sizeof(detailString), "-VelPID=[N] /  Y ");
       break;
     case eBattery:
-      snprintf(detailString, sizeof(detailString), "Batt: %.2f (%.0f%%)", state->batteryState.voltage, state->batteryState.voltagePercent);
+      snprintf(detailString, sizeof(detailString), "Batt: %.2f (%.0f%%)", battery->voltage, battery->voltagePercent);
       break;
   }
 
@@ -392,7 +392,7 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
   static unsigned long last_title_sent_millis = 0L;
   char titleString[SCREEN_CHAR_WIDTH] = { 0 };
   static char lastTitleBuf[SCREEN_CHAR_WIDTH + 1] = {};
-  snprintf(titleString, sizeof(titleString), "Pit=%+04.1f PWM=%.1f", state->imuState.orientation.pitch, ds.pwmDutyAccumulator);  // lastFrameRate
+  snprintf(titleString, sizeof(titleString), "Pit=%+04.1f PWM=%.1f", imu->state.orientation.pitch, ds.pwmDutyAccumulator);  // lastFrameRate
   if (strcmp(titleString, lastTitleBuf) || now - last_title_sent_millis > 1000) {
     remote->Send(MSGTYPE_CTL_TITLE, reinterpret_cast<const uint8_t*>(titleString), SEND_NULLTERMINATED);
     strcpy(lastTitleBuf, titleString);

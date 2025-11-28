@@ -17,7 +17,10 @@
 Adafruit_MPU6050 mpu;
 Adafruit_Mahony filter{};  // ...(float prop_gain, float int_gain) // Kp (was 16-ish), Ki
 
-void initImu(ImuParams* params) {
+void initImu(ImuConfig* imuConfig) {
+  auto& params = imuConfig->params;
+  auto& state = imuConfig->state;
+
   if (!mpu.begin()) {
     Serial.println("MPU-6050 init failed");
     while (1)
@@ -43,13 +46,13 @@ void initImu(ImuParams* params) {
   //   accel (gravity) data, which is perturbed by linear motion.
   //   A small Ki weight still corrects integration error from the
   //   accel (gravity) vector.
-  params->sampleFreq = g_sample_freq;
-  params->kp = 3.7f;
-  params->ki = 0.3f;
-  params->kiScale = 1.0f;
+  params.sampleFreq = g_sample_freq;
+  params.kp = 3.7f;
+  params.ki = 0.3f;
+  params.kiScale = 1.0f;
 
   // Param: samples per second
-  filter.begin(params->sampleFreq);
+  filter.begin(params.sampleFreq);
   // THen:
   // filter.updateIMU(gx/y/z, ax/y/z, [optional dT]) // DPS (deg. per sec) / Gs
   // getRoll/Pitch/Yaw(), getGravityVector()
@@ -57,7 +60,9 @@ void initImu(ImuParams* params) {
 }
 
 
-void updateOrientation(ImuParams* params, ImuState* state) {
+void updateOrientation(ImuConfig* imuConfig) {
+  auto& params = imuConfig->params;
+  auto& state = imuConfig->state;
   // static unsigned long lastUpdate = 0;
   // unsigned int now = millis();
   // // Target 100 Hz, coordinated with the rate we provided to filter.begin()
@@ -71,14 +76,14 @@ void updateOrientation(ImuParams* params, ImuState* state) {
   // Get the gyro (turn rate) in radians-per-second
   mpu.getEvent(&a, &g, &temp);
   if (!std::isfinite(g.gyro.x) || !std::isfinite(g.gyro.y) || !std::isfinite(g.gyro.z) || !std::isfinite(a.acceleration.x) || !std::isfinite(a.acceleration.y) || !std::isfinite(a.acceleration.z)) {
-    state->fault = true;
+    state.fault = true;
     return;
   }
-  state->fault = false;
+  state.fault = false;
 
   // Update in degrees-per-second and gravities
-  filter.setKp(params->kp);
-  filter.setKi(params->ki * params->kiScale);
+  filter.setKp(params.kp);
+  filter.setKi(params.ki * params.kiScale);
   filter.update(
     // From radians-per-second to degrees-per-second
     g.gyro.x * 180.0f / M_PI,
@@ -97,7 +102,7 @@ void updateOrientation(ImuParams* params, ImuState* state) {
   // dT is measures in seconds (i.e., nominally .01 @ 100Hz)
   // TODO: Send loops/sec to the remote
 
-  state->orientation.roll = filter.getRoll();
-  state->orientation.pitch = filter.getPitch();
-  state->orientation.yaw = filter.getYaw();
+  state.orientation.roll = filter.getRoll();
+  state.orientation.pitch = filter.getPitch();
+  state.orientation.yaw = filter.getYaw();
 }

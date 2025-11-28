@@ -1,5 +1,5 @@
 #pragma once
 #include "tuning.h"
 
-void initBatterySense(BalanceState* state);
-void updateBatterySense(BalanceState* state);
+void initBatterySense(BatteryState* state);
+void updateBatterySense(BatteryState* batteryState, DriveParams* driveParams);

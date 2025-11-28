@@ -83,19 +83,20 @@ struct BatteryState {
 };
 
 // TODO: Split into IMUState, MotorState, and BatteryState, as we may want to swap motor configs without swapping the others?
-struct BalanceState {
-  ImuParams imuParams;
-  ImuState imuState;
+// TODO: Collapse (e.g., imuParams -> params)
+struct ImuConfig {
+  ImuParams params;
+  ImuState state;
+};
 
+struct MotorConfig {
   DriveParams driveParams;
   DriveState driveState;
   PitchPIDParams pitchPidParams;
   VelocityPIDParams velocityPidParams;
-
-  BatteryState batteryState;
 };
 
 // Control / interaction methods to be called from Loop()
 void initInput(EspNowRemote::RmtBase* remote);
-void handleInput(BalanceState* state);
-void updateRemoteDisplay(EspNowRemote::RmtBase* remote, BalanceState* state);
+void handleInput(MotorConfig* motor, ImuConfig* imu, BatteryState* battery);
+void updateRemoteDisplay(EspNowRemote::RmtBase* remote, MotorConfig* motor, ImuConfig* imu, BatteryState* battery);

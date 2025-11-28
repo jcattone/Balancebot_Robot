@@ -9,11 +9,11 @@ using namespace EspNowRemote;
 bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds, PitchPIDParams& pp);
 bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp, DriveState& ds, VelocityPIDParams& vp);
 
-void initMotors(BalanceState* state) {
-  DriveParams* driveParams = &state->driveParams;
-  DriveState* driveState = &state->driveState;
-  PitchPIDParams* pitchParams = &state->pitchPidParams;
-  VelocityPIDParams* velocityParams = &state->velocityPidParams;
+void initMotors(MotorConfig* motorConfig) {
+  DriveParams* driveParams = &motorConfig->driveParams;
+  DriveState* driveState = &motorConfig->driveState;
+  PitchPIDParams* pitchParams = &motorConfig->pitchPidParams;
+  VelocityPIDParams* velocityParams = &motorConfig->velocityPidParams;
 
   driveParams->idleMode = eBraking;
   // The following three are floats (instead of int) to avoid runtime conversion
@@ -94,11 +94,11 @@ void initMotors(BalanceState* state) {
 //     Why isn't the velocity pid countering lingering duty w/ counter-tilt?
 //   * Sometimes, a large change of angle runs away rapidly.  Seems like pitch
 //     pid not responding rapidly enough.  Fusion / IMU issue (Kp/Ki)?
-void updateMotors(BalanceState* state) {
+void updateMotors(MotorConfig* motorConfig, ImuState* imuState) {
   static int startupPwmAttenuation = 0;
   unsigned long nowMs = millis();
-  auto& dp = state->driveParams;
-  auto& ds = state->driveState;
+  auto& dp = motorConfig->driveParams;
+  auto& ds = motorConfig->driveState;
 
   // ----------------------------------------
   // Perform updates every 5ms (200/sec)
@@ -149,7 +149,7 @@ void updateMotors(BalanceState* state) {
     desiredSpeedNormalized *= -1.0;
 
   float desiredPitchOut = 0.0f;
-  bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredPitchOut, dp, ds, state->velocityPidParams);
+  bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredPitchOut, dp, ds, motorConfig->velocityPidParams);
   if (emitDiag) {
     Serial.printf("desiredSpeedNormalized   : %.1f\n", desiredSpeedNormalized);
     Serial.printf("desiredPitchOut          : %.1f\n", desiredPitchOut);
@@ -158,7 +158,7 @@ void updateMotors(BalanceState* state) {
   // The current pitch will be compared to the desired pitch setpoint to determine
   // what acceleration is necessary to achieve that pitch setpoint.
   float pidAccelOut;  // -255..255 nominal
-  bool pitchPidFault = pitchPidUpdate(state->imuState.orientation.pitch, desiredPitchOut, deltaTSec, pidAccelOut, dp, ds, state->pitchPidParams);
+  bool pitchPidFault = pitchPidUpdate(imuState->orientation.pitch, desiredPitchOut, deltaTSec, pidAccelOut, dp, ds, motorConfig->pitchPidParams);
   // The acceleration is constrained to a reasonable range
   float rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
   if (emitDiag) {
@@ -184,7 +184,7 @@ void updateMotors(BalanceState* state) {
   // but increasing side-to-side accel).
   static float normalizedAccelMagPeak = 0.0f;
   normalizedAccelMagPeak = std::max(gAccelPeakDecay * normalizedAccelMagPeak, std::abs(constrainedAccel) / 255.0f);
-  state->imuParams.kiScale = 1.0f - normalizedAccelMagPeak;
+  imuConfig->params.kiScale = 1.0f - normalizedAccelMagPeak;
 #endif
 
   // ----------------------------------
@@ -329,7 +329,7 @@ void updateMotors(BalanceState* state) {
   static unsigned long anyFaultTimeMs = 0;
   static bool anyFault = false;
   bool wasPidFault = anyFault;
-  anyFault = velocityPidFault || pitchPidFault || state->imuState.fault;
+  anyFault = velocityPidFault || pitchPidFault || imuState->fault;
   if (anyFault && !wasPidFault) {
     if (velocityPidFault)
       Serial.println("Velocity Fault!");
