@@ -16,7 +16,7 @@
 using namespace EspNowRemote;
 RmtBase* remote = EspNowRemote::MakeController();
 
-BalanceState state {};
+BalanceState state{};
 
 void setup() {
   Serial.begin(115200);
@@ -37,17 +37,16 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
 
   initBatterySense();
-  initMotors(&state.driveParams, &state.driveState, &state.pitchPidParams);
+  initMotors(&state.driveParams, &state.driveState, &state.pitchPidParams, &state.velocityPidParams);
   initImu(&state.imuParams);
   initInput(remote);
-
 }
 
 void loop() {
   // Pump the remote's message queue, allowing rx and tx in a timely manner
   remote->Loop();
 
-  // Handle input events as they occur, but most effects won't 
+  // Handle input events as they occur, but most effects won't
   // take effect unil the next control loop below.
   handleInput(&state);
 
@@ -67,4 +66,3 @@ void loop() {
     updateMotors(&state);
   }
 }
-

@@ -19,13 +19,6 @@ float gAccelPeakDecay = 0.990f;
 float gVoltage = 0.0f;
 float gVoltagePercent = 0.0f;
 
-float gSpeedIIRWeight = 0.020;  // Was 0.1.  .01 weights the current speed; the IIR decays to < 2% in one second
-float gVelocityPidKp = 6.0f;
-float gVelocityPidKi = 2.0f;  // Experimental - overcomes carpet 'stuck', but exacerbates over-acceleration
-float gVelocityPidKd = 0.0f;
-float gVelocityDIIRWeight = 0.50f;
-bool gInvertVelocityPid = true;
-
 
 bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len);
 
@@ -92,6 +85,7 @@ void handleInput(BalanceState* state) {
   auto& dp = state->driveParams;
   auto& ds = state->driveState;
   auto& pp = state->pitchPidParams;
+  auto& vp = state->velocityPidParams;
 
   static unsigned long last_hid_message_processed = 0;
   if (last_hid_message_processed == last_hid_input_timestamp)
@@ -204,15 +198,15 @@ void handleInput(BalanceState* state) {
         break;
       case eVelocityDIIRWeight:
         if (right)
-          gVelocityDIIRWeight = min(1.0f, gVelocityDIIRWeight + 0.01f * count);
+          vp.dIIRWeight = min(1.0f, vp.dIIRWeight + 0.01f * count);
         else if (left)
-          gVelocityDIIRWeight = max(0.0f, gVelocityDIIRWeight - 0.01f * count);
+          vp.dIIRWeight = max(0.0f, vp.dIIRWeight - 0.01f * count);
         break;
       case eVelocityCurSpeedIIRWeight:
         if (right)
-          gSpeedIIRWeight = min(1.0f, gSpeedIIRWeight + 0.001f * count);
+          vp.inputIIRWeight = min(1.0f, vp.inputIIRWeight + 0.001f * count);
         else if (left)
-          gSpeedIIRWeight = max(0.0f, gSpeedIIRWeight - 0.001f * count);
+          vp.inputIIRWeight = max(0.0f, vp.inputIIRWeight - 0.001f * count);
         break;
       case eMaxThrottle:
         if (right)
@@ -242,19 +236,19 @@ void handleInput(BalanceState* state) {
         adjustPidK(&pp.kd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
       case eVelocityPidKp:
-        adjustPidK(&gVelocityPidKp, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        adjustPidK(&vp.kp, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
       case eVelocityPidKi:
-        adjustPidK(&gVelocityPidKi, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        adjustPidK(&vp.ki, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
       case eVelocityPidKd:
-        adjustPidK(&gVelocityPidKd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        adjustPidK(&vp.kd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
       case eInvertVelocityPid:
         if (right)
-          gInvertVelocityPid = true;
+          vp.invertFeedback = true;
         else if (left)
-          gInvertVelocityPid = false;
+          vp.invertFeedback = false;
         break;
       case eReset:
         if (count > 5) {
@@ -277,10 +271,10 @@ void handleInput(BalanceState* state) {
           pp.kd = 0.0f;
           pp.dIIRWeight = 1.0f;
 
-          gVelocityDIIRWeight = 1.0f;
-          gVelocityPidKp = 0.0f;
-          gVelocityPidKi = 0.0f;
-          gVelocityPidKd = 0.0f;
+          vp.dIIRWeight = 1.0f;
+          vp.kp = 0.0f;
+          vp.ki = 0.0f;
+          vp.kd = 0.0f;
         }
         break;
       case eIMUDisplay:
@@ -290,13 +284,13 @@ void handleInput(BalanceState* state) {
   }
 }
 
-
-// TODO: ABort immediately if not connected, and always update when reconnected
+// TODO: Abort immediately if not connected, and always update when reconnected
 void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
   unsigned int now = millis();
   auto& dp = state->driveParams;
   auto& ds = state->driveState;
   auto& pp = state->pitchPidParams;
+  auto& vp = state->velocityPidParams;
 
   static int frameCount = 0;
   static int lastFrameRate = 0;
@@ -363,10 +357,10 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
       snprintf(detailString, sizeof(detailString), "P_IIR: %.2f", pp.dIIRWeight);
       break;
     case eVelocityDIIRWeight:
-      snprintf(detailString, sizeof(detailString), "V_IIR: %.2f", gVelocityDIIRWeight);
+      snprintf(detailString, sizeof(detailString), "V_IIR: %.2f", vp.dIIRWeight);
       break;
     case eVelocityCurSpeedIIRWeight:
-      snprintf(detailString, sizeof(detailString), "SP_IIR: %.3f", gSpeedIIRWeight);
+      snprintf(detailString, sizeof(detailString), "SP_IIR: %.3f", vp.inputIIRWeight);
       break;
     case ePitchPidKp:
       snprintf(detailString, sizeof(detailString), "pPID *%.2f %.2f %.2f", pp.kp, pp.ki, pp.kd);
@@ -378,16 +372,16 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
       snprintf(detailString, sizeof(detailString), "pPID %.2f %.2f *%.2f", pp.kp, pp.ki, pp.kd);
       break;
     case eVelocityPidKp:
-      snprintf(detailString, sizeof(detailString), "vPID *%.2f %.2f %.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
+      snprintf(detailString, sizeof(detailString), "vPID *%.2f %.2f %.2f", vp.kp, vp.ki, vp.kd);
       break;
     case eVelocityPidKi:
-      snprintf(detailString, sizeof(detailString), "vPID %.2f *%.2f %.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
+      snprintf(detailString, sizeof(detailString), "vPID %.2f *%.2f %.2f", vp.kp, vp.ki, vp.kd);
       break;
     case eVelocityPidKd:
-      snprintf(detailString, sizeof(detailString), "vPID %.2f %.2f *%.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);
+      snprintf(detailString, sizeof(detailString), "vPID %.2f %.2f *%.2f", vp.kp, vp.ki, vp.kd);
       break;
     case eInvertVelocityPid:
-      if (gInvertVelocityPid)
+      if (vp.invertFeedback)
         snprintf(detailString, sizeof(detailString), "-VelPID= N  / [Y]");
       else
         snprintf(detailString, sizeof(detailString), "-VelPID=[N] /  Y ");

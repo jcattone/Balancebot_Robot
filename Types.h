@@ -15,7 +15,7 @@ enum eConfigMode {
   ePwmMin,
   ePwmMax,
   ePwmFreq,
-  
+
   ePitchPidKp,
   ePitchPidKi,
   ePitchPidKd,
@@ -25,7 +25,7 @@ enum eConfigMode {
   eVelocityPidKi,
   eVelocityPidKd,
   eVelocityDIIRWeight,
-  eVelocityCurSpeedIIRWeight, // gSpeedIIRWeight
+  eVelocityCurSpeedIIRWeight,
 
   eMaxThrottle,
 

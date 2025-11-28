@@ -7,9 +7,9 @@
 using namespace EspNowRemote;
 
 bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds, PitchPIDParams& pp);
-bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp, DriveState& ds);
+bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp, DriveState& ds, VelocityPIDParams& vp);
 
-void initMotors(DriveParams* driveParams, DriveState* driveState, PitchPIDParams* pitchParams) {
+void initMotors(DriveParams* driveParams, DriveState* driveState, PitchPIDParams* pitchParams, VelocityPIDParams* velocityParams) {
   driveParams->idleMode = eBraking;
   // The following three are floats (instead of int) to avoid runtime conversion
   // to float when comparing to pwmDutyAccumulator / pwmDutyAppliedMagnitude
@@ -36,6 +36,13 @@ void initMotors(DriveParams* driveParams, DriveState* driveState, PitchPIDParams
   pitchParams->ki = 0.0f;
   pitchParams->kd = 0.06f;
   pitchParams->dIIRWeight = 1.0f;
+
+  velocityParams->inputIIRWeight = 0.020;  // Was 0.1.  .01 weights the current speed; the IIR decays to < 2% in one second
+  velocityParams->kp = 6.0f;
+  velocityParams->ki = 2.0f;  // Experimental - overcomes carpet 'stuck', but exacerbates over-acceleration
+  velocityParams->kd = 0.0f;
+  velocityParams->dIIRWeight = 0.50f;
+  velocityParams->invertFeedback = true;
 
   pinMode(MOTORA_PIN_1, OUTPUT);
   pinMode(MOTORA_PIN_2, OUTPUT);
@@ -137,7 +144,7 @@ void updateMotors(BalanceState* state) {
     desiredSpeedNormalized *= -1.0;
 
   float desiredPitchOut = 0.0f;
-  bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredPitchOut, dp, ds);
+  bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredPitchOut, dp, ds, state->velocityPidParams);
   if (emitDiag) {
     Serial.printf("desiredSpeedNormalized   : %.1f\n", desiredSpeedNormalized);
     Serial.printf("desiredPitchOut          : %.1f\n", desiredPitchOut);
@@ -510,7 +517,7 @@ bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, flo
 // Given a desired speed, guide the pitch.
 // If we need to speed up, lean into the appropriate direction
 // If we need to slow down, lean away from the direction of travel
-bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp, DriveState& ds) {
+bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp, DriveState& ds, VelocityPIDParams& vp) {
   // We could look at pwmDutyAccumulator directly, but we can disregard
   // the deadzone and power scaling by deriving an effective velocity
   // from the applied magnitude relative to the scaled power range.
@@ -526,13 +533,13 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
     currentVelocityNormalized *= -1.0f;
 
   // Smooth the current velocity
-  // NOTE: This smoothing (via gSpeedIIRWeight) plays heavily into the ability to control speed.
+  // NOTE: This smoothing (via vp.inputIIRWeight) plays heavily into the ability to control speed.
   // While we want to smooth the current velocity to ignore jittering, we also need the smoothed
   // velocity to respond fast enough to prevent the speed from accelerating to the point where
   // we no longer have enough corrective capacity to balance.  Similarly, we don't want the memory
   // of fast movement to bias the speed during low-throttle input.
   static float smoothedVelocityNormalized = 0.0f;
-  smoothedVelocityNormalized = gSpeedIIRWeight * currentVelocityNormalized + (1.0f - gSpeedIIRWeight) * smoothedVelocityNormalized;
+  smoothedVelocityNormalized = vp.inputIIRWeight * currentVelocityNormalized + (1.0f - vp.inputIIRWeight) * smoothedVelocityNormalized;
 
   // The subsequent pitch controller produces accel matching the sign of the current pitch /error/ (opposite to control changes)
   // At this point, a currentVelocityNormalized > 0 is travelling in the same direction as a positive pitch would produce.
@@ -589,12 +596,12 @@ bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pit
   static float errorDeltaPerSecondIIR = 0.0f;
   float errorDeltaPerSecond = (velocityErrorNormalized - lastErrorVelocity) / deltaTSec;
   // IIR; Smooth the delta over multiple readings
-  errorDeltaPerSecondIIR = gVelocityDIIRWeight * errorDeltaPerSecond + (1.0f - gVelocityDIIRWeight) * errorDeltaPerSecondIIR;
+  errorDeltaPerSecondIIR = vp.dIIRWeight * errorDeltaPerSecond + (1.0f - vp.dIIRWeight) * errorDeltaPerSecondIIR;
   lastErrorVelocity = velocityErrorNormalized;
   float D = errorDeltaPerSecondIIR;
 
-  pitchTarget = (gVelocityPidKp * P + gVelocityPidKi * I + gVelocityPidKd * D);
-  if (gInvertVelocityPid)
+  pitchTarget = (vp.kp * P + vp.ki * I + vp.kd * D);
+  if (vp.invertFeedback)
     pitchTarget = -pitchTarget;
 #ifdef SERIAL_DIAG
   Serial.printf("SpeedBias:%.2f,PitchTgt:%.3f\n", desiredSpeedNormalized, pitchTarget);

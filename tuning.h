@@ -55,9 +55,9 @@ struct DriveParams {
 };
 
 struct DriveState {
-  float pwmDutyAccumulator;      // gPwmDutyAccumulator;
-  float pwmDutyAppliedMagnitude; // gPwmDutyAppliedMagnitude;
-  int pwmFreq;                   // gPwmFreq;
+  float pwmDutyAccumulator;       // gPwmDutyAccumulator;
+  float pwmDutyAppliedMagnitude;  // gPwmDutyAppliedMagnitude;
+  int pwmFreq;                    // gPwmFreq;
 };
 
 // BatteryState
@@ -72,13 +72,14 @@ struct PitchPIDParams {
   float dIIRWeight;  // gPitchDIIRWeight = 1.0f;
 };
 
-// SpeedPidParams
-extern float gSpeedIIRWeight;
-extern float gVelocityPidKp;
-extern float gVelocityPidKi;
-extern float gVelocityPidKd;
-extern float gVelocityDIIRWeight;
-extern bool gInvertVelocityPid;
+struct VelocityPIDParams {
+  float inputIIRWeight;
+  float kp;
+  float ki;
+  float kd;
+  float dIIRWeight;
+  bool invertFeedback;
+};
 
 struct BalanceState {
   ImuParams imuParams;
@@ -86,6 +87,7 @@ struct BalanceState {
   DriveParams driveParams;
   DriveState driveState;
   PitchPIDParams pitchPidParams;
+  VelocityPIDParams velocityPidParams;
 };
 
 // Control / interaction methods to be called from Loop()
