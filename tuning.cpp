@@ -19,15 +19,6 @@ float gAccelPeakDecay = 0.990f;
 float gVoltage = 0.0f;
 float gVoltagePercent = 0.0f;
 
-// Or 0.16 - 0.24 seems to work well with Kd=~0.06-0.07
-// Lower values help with smooth stability at low deflection, but don't respond quickly enough to correct for nudges
-
-// Originally: pitch 0.3/0/0.05 (IIR .16), vel 0.14/0/0 (IIR .8) w/ intrinsic 60x
-float gPitchPidKp = 0.46f;
-float gPitchPidKi = 0.0f;
-float gPitchPidKd = 0.06f;
-float gDIIRWeight = 1.0f;
-
 float gSpeedIIRWeight = 0.020;  // Was 0.1.  .01 weights the current speed; the IIR decays to < 2% in one second
 float gVelocityPidKp = 6.0f;
 float gVelocityPidKi = 2.0f;  // Experimental - overcomes carpet 'stuck', but exacerbates over-acceleration
@@ -100,6 +91,7 @@ void handleInput(BalanceState* state) {
 
   auto& dp = state->driveParams;
   auto& ds = state->driveState;
+  auto& pp = state->pitchPidParams;
 
   static unsigned long last_hid_message_processed = 0;
   if (last_hid_message_processed == last_hid_input_timestamp)
@@ -206,9 +198,9 @@ void handleInput(BalanceState* state) {
         break;
       case eDIIRWeight:
         if (right)
-          gDIIRWeight = min(1.0f, gDIIRWeight + 0.01f * count);
+          pp.dIIRWeight = min(1.0f, pp.dIIRWeight + 0.01f * count);
         else if (left)
-          gDIIRWeight = max(0.0f, gDIIRWeight - 0.01f * count);
+          pp.dIIRWeight = max(0.0f, pp.dIIRWeight - 0.01f * count);
         break;
       case eVelocityDIIRWeight:
         if (right)
@@ -241,13 +233,13 @@ void handleInput(BalanceState* state) {
           dp.idleMode = eBraking;
         break;
       case ePitchPidKp:
-        adjustPidK(&gPitchPidKp, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        adjustPidK(&pp.kp, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
       case ePitchPidKi:
-        adjustPidK(&gPitchPidKi, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        adjustPidK(&pp.ki, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
       case ePitchPidKd:
-        adjustPidK(&gPitchPidKd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
+        adjustPidK(&pp.kd, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
         break;
       case eVelocityPidKp:
         adjustPidK(&gVelocityPidKp, right ? 0.01f * count : (left ? -0.01f * count : 0.0f));
@@ -280,10 +272,10 @@ void handleInput(BalanceState* state) {
           ds.pwmDutyAppliedMagnitude = 0.0f;
           ds.pwmFreq = 2 * g_update_freq;
 
-          gPitchPidKp = 0.0f;
-          gPitchPidKi = 0.0f;
-          gPitchPidKd = 0.0f;
-          gDIIRWeight = 1.0f;
+          pp.kp = 0.0f;
+          pp.ki = 0.0f;
+          pp.kd = 0.0f;
+          pp.dIIRWeight = 1.0f;
 
           gVelocityDIIRWeight = 1.0f;
           gVelocityPidKp = 0.0f;
@@ -304,6 +296,7 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
   unsigned int now = millis();
   auto& dp = state->driveParams;
   auto& ds = state->driveState;
+  auto& pp = state->pitchPidParams;
 
   static int frameCount = 0;
   static int lastFrameRate = 0;
@@ -364,10 +357,10 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
         snprintf(detailString, sizeof(detailString), "Idle= B  / [C]");
       break;
     case ePwmFreq:
-      snprintf(detailString, sizeof(detailString), "pwmFreq=%d (%.1f)", ds.pwmFreq, ds.pwmDutyAccumulator);
+      snprintf(detailString, sizeof(detailString), "pwmFreq=%d", ds.pwmFreq);
       break;
     case eDIIRWeight:
-      snprintf(detailString, sizeof(detailString), "P_IIR: %.2f", gDIIRWeight);
+      snprintf(detailString, sizeof(detailString), "P_IIR: %.2f", pp.dIIRWeight);
       break;
     case eVelocityDIIRWeight:
       snprintf(detailString, sizeof(detailString), "V_IIR: %.2f", gVelocityDIIRWeight);
@@ -376,13 +369,13 @@ void updateRemoteDisplay(RmtBase* remote, BalanceState* state) {
       snprintf(detailString, sizeof(detailString), "SP_IIR: %.3f", gSpeedIIRWeight);
       break;
     case ePitchPidKp:
-      snprintf(detailString, sizeof(detailString), "pPID *%.2f %.2f %.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
+      snprintf(detailString, sizeof(detailString), "pPID *%.2f %.2f %.2f", pp.kp, pp.ki, pp.kd);
       break;
     case ePitchPidKi:
-      snprintf(detailString, sizeof(detailString), "pPID %.2f *%.2f %.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
+      snprintf(detailString, sizeof(detailString), "pPID %.2f *%.2f %.2f", pp.kp, pp.ki, pp.kd);
       break;
     case ePitchPidKd:
-      snprintf(detailString, sizeof(detailString), "pPID %.2f %.2f *%.2f", gPitchPidKp, gPitchPidKi, gPitchPidKd);
+      snprintf(detailString, sizeof(detailString), "pPID %.2f %.2f *%.2f", pp.kp, pp.ki, pp.kd);
       break;
     case eVelocityPidKp:
       snprintf(detailString, sizeof(detailString), "vPID *%.2f %.2f %.2f", gVelocityPidKp, gVelocityPidKi, gVelocityPidKd);

@@ -6,41 +6,46 @@
 
 using namespace EspNowRemote;
 
-bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds);
+bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds, PitchPIDParams& pp);
 bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp, DriveState& ds);
 
-void initMotors(DriveParams* params, DriveState* state) {
-  params->idleMode = eBraking;
+void initMotors(DriveParams* driveParams, DriveState* driveState, PitchPIDParams* pitchParams) {
+  driveParams->idleMode = eBraking;
   // The following three are floats (instead of int) to avoid runtime conversion
   // to float when comparing to pwmDutyAccumulator / pwmDutyAppliedMagnitude
-  params->deadZone = 1;
-  params->pwmMinDuty = 23;
+  driveParams->deadZone = 1;
+  driveParams->pwmMinDuty = 23;
   // 160 is nominal ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
   // but a bit more oomph helps recovery
-  params->pwmMaxDuty = 240;
+  driveParams->pwmMaxDuty = 240;
   // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
-  params->pitchTrim = -2.8f;
+  driveParams->pitchTrim = -2.8f;
   // The fraction shifted from one motor to the other
   // TODO: Implement PID control for this, driven by encoder input?
-  params->yawTrim = 0.0f;
-  params->maxThrottleBias = (160.0f / 255.0f);  // Target roughly 5V max throttle (with headroom for correction)
-  params->motorFilterWeight = 0.908f;
-  params->throttleBias = 0.0f;
-  params->steeringBias = 0.0f;
+  driveParams->yawTrim = 0.0f;
+  driveParams->maxThrottleBias = (160.0f / 255.0f);  // Target roughly 5V max throttle (with headroom for correction)
+  driveParams->motorFilterWeight = 0.908f;
+  driveParams->throttleBias = 0.0f;
+  driveParams->steeringBias = 0.0f;
 
-  state->pwmDutyAccumulator = 0.0f;       // The raw PWM target
-  state->pwmDutyAppliedMagnitude = 0.0f;  // pwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
-  state->pwmFreq = 16000;
+  driveState->pwmDutyAccumulator = 0.0f;       // The raw PWM target
+  driveState->pwmDutyAppliedMagnitude = 0.0f;  // pwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
+  driveState->pwmFreq = 16000;
+
+  pitchParams->kp = 0.46f;
+  pitchParams->ki = 0.0f;
+  pitchParams->kd = 0.06f;
+  pitchParams->dIIRWeight = 1.0f;
 
   pinMode(MOTORA_PIN_1, OUTPUT);
   pinMode(MOTORA_PIN_2, OUTPUT);
   pinMode(MOTORB_PIN_1, OUTPUT);
   pinMode(MOTORB_PIN_2, OUTPUT);
 
-  analogWriteFrequency(MOTORA_PIN_1, state->pwmFreq);
-  analogWriteFrequency(MOTORA_PIN_2, state->pwmFreq);
-  analogWriteFrequency(MOTORB_PIN_1, state->pwmFreq);
-  analogWriteFrequency(MOTORB_PIN_2, state->pwmFreq);
+  analogWriteFrequency(MOTORA_PIN_1, driveState->pwmFreq);
+  analogWriteFrequency(MOTORA_PIN_2, driveState->pwmFreq);
+  analogWriteFrequency(MOTORB_PIN_1, driveState->pwmFreq);
+  analogWriteFrequency(MOTORB_PIN_2, driveState->pwmFreq);
 
   analogWriteResolution(MOTORA_PIN_1, PWM_PRECISION);  // scale all pwm output by 2^4 (16)
   analogWriteResolution(MOTORA_PIN_2, PWM_PRECISION);
@@ -48,7 +53,7 @@ void initMotors(DriveParams* params, DriveState* state) {
   analogWriteResolution(MOTORB_PIN_2, PWM_PRECISION);
 
   // Initializing the motor pins uniformly solves the 'jerk on startup' problem
-  if (params->idleMode == eBraking) {
+  if (driveParams->idleMode == eBraking) {
     unsigned int pwmAlwaysOn = 255 * PWM_SCALE_FROM_8BIT;
     analogWrite(MOTORA_PIN_1, pwmAlwaysOn);
     analogWrite(MOTORA_PIN_2, pwmAlwaysOn);
@@ -141,7 +146,7 @@ void updateMotors(BalanceState* state) {
   // The current pitch will be compared to the desired pitch setpoint to determine
   // what acceleration is necessary to achieve that pitch setpoint.
   float pidAccelOut;  // -255..255 nominal
-  bool pitchPidFault = pitchPidUpdate(state->imuState.orientation.pitch, desiredPitchOut, deltaTSec, pidAccelOut, dp, ds);
+  bool pitchPidFault = pitchPidUpdate(state->imuState.orientation.pitch, desiredPitchOut, deltaTSec, pidAccelOut, dp, ds, state->pitchPidParams);
   // The acceleration is constrained to a reasonable range
   float rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
   if (emitDiag) {
@@ -410,14 +415,14 @@ void updateMotors(BalanceState* state) {
 // That corresponds to the base (wheels) moving backwards to achieve a forward tilt.
 // Once the current angle exceeds the desired angle (), the accel switches direction,
 // seeking to drive the wheels to chase the body.
-bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds) {
+bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds, PitchPIDParams& pp) {
   // TODO: Map accel based on angle, knowing that small angles need
   // very little correction, but high angles need super-linear adjustment.
   // e.g., the accel could be proportional to cos(errorAngle),
   // or (perhaps more accurately), cos(angle) where vertical is 0
 
   // PID per-update inputs
-  // gPitchTrim shifts the reported angle to a 'true' angle.
+  // pitchTrim shifts the reported angle to a 'true' angle.
   // [-90, -90] generally speaking (pitch decreases after 90 for some reason?)
   float currentAngle = currentPitch - dp.pitchTrim;
 
@@ -488,7 +493,7 @@ bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, flo
   static float errorDeltaPerSecondIIR = 0.0f;
   float errorDeltaPerSecond = (errorAngle - lastErrorAngle) / deltaTSec;
   // IIR; weight the accumulator heavily, and the new value lightly.
-  errorDeltaPerSecondIIR = gDIIRWeight * errorDeltaPerSecond + (1.0f - gDIIRWeight) * errorDeltaPerSecondIIR;
+  errorDeltaPerSecondIIR = pp.dIIRWeight * errorDeltaPerSecond + (1.0f - pp.dIIRWeight) * errorDeltaPerSecondIIR;
   lastErrorAngle = errorAngle;
   float D = errorDeltaPerSecondIIR;
   // { // Debug
@@ -498,7 +503,7 @@ bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, flo
   //     lastLogMillis = millis();
   //   }
   // }
-  accelOut = gPitchPidKp * P + gPitchPidKi * I + gPitchPidKd * D;
+  accelOut = pp.kp * P + pp.ki * I + pp.kd * D;
   return pitchPidFault;
 }
 

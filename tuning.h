@@ -64,11 +64,13 @@ struct DriveState {
 extern float gVoltage;
 extern float gVoltagePercent;
 
-// PitchPidParams
-extern float gPitchPidKp;
-extern float gPitchPidKi;
-extern float gPitchPidKd;
-extern float gDIIRWeight;
+// Originally: pitch 0.3/0/0.05 (IIR .16), vel 0.14/0/0 (IIR .8) w/ intrinsic 60x
+struct PitchPIDParams {
+  float kp;          // gPitchPidKp = 0.46f;
+  float ki;          // gPitchPidKi = 0.0f;
+  float kd;          // gPitchPidKd = 0.06f;
+  float dIIRWeight;  // gPitchDIIRWeight = 1.0f;
+};
 
 // SpeedPidParams
 extern float gSpeedIIRWeight;
@@ -83,6 +85,7 @@ struct BalanceState {
   ImuState imuState;
   DriveParams driveParams;
   DriveState driveState;
+  PitchPIDParams pitchPidParams;
 };
 
 // Control / interaction methods to be called from Loop()

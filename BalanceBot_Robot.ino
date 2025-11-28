@@ -37,7 +37,7 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
 
   initBatterySense();
-  initMotors(&state.driveParams, &state.driveState);
+  initMotors(&state.driveParams, &state.driveState, &state.pitchPidParams);
   initImu(&state.imuParams);
   initInput(remote);
 

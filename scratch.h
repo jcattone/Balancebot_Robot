@@ -15,7 +15,7 @@
 // TODO: Partially attenuate Angle PID Kp based on angle max IIR, allowing response
 //       to become more subtle near balance, but immediately ramp up for correction.
 //       Maybe other params are adaptive as well?
-// TODO: Auto-tune pitch trim - observe average power when gThrottleBias == 0, slowly adjust gPitchTrim to bring the averaged pwmDutyAccumulator closer to 0
+// TODO: Auto-tune pitch trim - observe average power when gThrottleBias == 0, slowly adjust pitchTrim to bring the averaged pwmDutyAccumulator closer to 0
 // TODO: Battery gauge: investigate BatterySense library, only sample when the motor is off, or at least not accelerating to a greater magnitude?
 // TODO: Set a battery fault if the voltage falls below a critical level
 // TODO: Use voltage sense to dynamically adjust the pwm range (at the least, the max), but use an IIR or when-motor-off sampling to avoid oscillation from motor draw
@@ -26,7 +26,7 @@
 //   Seems a resilient (if rubberbandy) balance, driveable, somewhat resistant to sudden wheel blockage
 //   pKd=0.07, P_IIR=1.0 seems to reduce jitter and be just enough responsive to moderate disturbances
 //   Learning... overly aggressive Mahony Kp was at the heart of much of the jitter and instability.
-//   D-smoothing (gDIIRWeight) further caused D to lag.  This might have produced a phase offset (lag)
+//   D-smoothing (dIIRWeight) further caused D to lag.  This might have produced a phase offset (lag)
 //     that resulted in oscillation / orbiting in the state-space?
 //   While keeping target speeds to < 5V average for the motors' benefit, we can use brief bursts up to full
 //     supply voltage (~8.4V) for emergency correction. However, that should be limited to prevent motor damage.
