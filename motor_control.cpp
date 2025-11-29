@@ -428,11 +428,6 @@ void updateMotors(MotorConfig* motorConfig, ImuConfig* imuConfig) {
 // Once the current angle exceeds the desired angle (), the accel switches direction,
 // seeking to drive the wheels to chase the body.
 bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds, PitchPIDParams& pp) {
-  // TODO: Map accel based on angle, knowing that small angles need
-  // very little correction, but high angles need super-linear adjustment.
-  // e.g., the accel could be proportional to cos(errorAngle),
-  // or (perhaps more accurately), cos(angle) where vertical is 0
-
   // PID per-update inputs
   // pitchTrim shifts the reported angle to a 'true' angle.
   // [-90, -90] generally speaking (pitch decreases after 90 for some reason?)
