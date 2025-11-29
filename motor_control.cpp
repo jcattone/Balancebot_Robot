@@ -32,10 +32,10 @@ void initMotors(MotorConfig* motorConfig) {
   driveParams->motorFilterWeight = 0.908f;
   driveParams->throttleBias = 0.0f;
   driveParams->steeringBias = 0.0f;
+  driveParams->pwmFreq = 16000;
 
   driveState->pwmDutyAccumulator = 0.0f;       // The raw PWM target
   driveState->pwmDutyAppliedMagnitude = 0.0f;  // pwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
-  driveState->pwmFreq = 16000;
 
   pitchParams->kp = 0.46f;
   pitchParams->ki = 0.0f;
@@ -54,10 +54,10 @@ void initMotors(MotorConfig* motorConfig) {
   pinMode(MOTORB_PIN_1, OUTPUT);
   pinMode(MOTORB_PIN_2, OUTPUT);
 
-  analogWriteFrequency(MOTORA_PIN_1, driveState->pwmFreq);
-  analogWriteFrequency(MOTORA_PIN_2, driveState->pwmFreq);
-  analogWriteFrequency(MOTORB_PIN_1, driveState->pwmFreq);
-  analogWriteFrequency(MOTORB_PIN_2, driveState->pwmFreq);
+  analogWriteFrequency(MOTORA_PIN_1, driveParams->pwmFreq);
+  analogWriteFrequency(MOTORA_PIN_2, driveParams->pwmFreq);
+  analogWriteFrequency(MOTORB_PIN_1, driveParams->pwmFreq);
+  analogWriteFrequency(MOTORB_PIN_2, driveParams->pwmFreq);
 
   analogWriteResolution(MOTORA_PIN_1, PWM_PRECISION);  // scale all pwm output by 2^4 (16)
   analogWriteResolution(MOTORA_PIN_2, PWM_PRECISION);

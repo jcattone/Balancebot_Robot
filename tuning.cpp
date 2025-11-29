@@ -168,15 +168,15 @@ void handleInput(RemoteInput* ri, MotorConfig* motor, ImuConfig* imu, BatterySta
       case ePwmFreq:
         {
           for (int i = 0; i < count; ++i) {
-            if (right) ds.pwmFreq = min(19000, max(ds.pwmFreq + 1, (int)(ds.pwmFreq * 1.1f)));
-            else if (left) ds.pwmFreq = max(10, min(ds.pwmFreq - 1, (int)(ds.pwmFreq / 1.1f)));
+            if (right) dp.pwmFreq = min(19000, max(dp.pwmFreq + 1, (int)(dp.pwmFreq * 1.1f)));
+            else if (left) dp.pwmFreq = max(10, min(dp.pwmFreq - 1, (int)(dp.pwmFreq / 1.1f)));
           }
 
           if (right || left) {
-            analogWriteFrequency(MOTORA_PIN_1, ds.pwmFreq);
-            analogWriteFrequency(MOTORA_PIN_2, ds.pwmFreq);
-            analogWriteFrequency(MOTORB_PIN_1, ds.pwmFreq);
-            analogWriteFrequency(MOTORB_PIN_2, ds.pwmFreq);
+            analogWriteFrequency(MOTORA_PIN_1, dp.pwmFreq);
+            analogWriteFrequency(MOTORA_PIN_2, dp.pwmFreq);
+            analogWriteFrequency(MOTORB_PIN_1, dp.pwmFreq);
+            analogWriteFrequency(MOTORB_PIN_2, dp.pwmFreq);
           }
         }
         break;
@@ -260,7 +260,7 @@ void handleInput(RemoteInput* ri, MotorConfig* motor, ImuConfig* imu, BatterySta
 
           ds.pwmDutyAccumulator = 0.0f;
           ds.pwmDutyAppliedMagnitude = 0.0f;
-          ds.pwmFreq = 2 * UPDATE_FREQ;
+          dp.pwmFreq = 2 * UPDATE_FREQ;
 
           pp.kp = 0.0f;
           pp.ki = 0.0f;
@@ -347,7 +347,7 @@ void updateRemoteDisplay(RmtBase* remote, RemoteInput* ri, MotorConfig* motor, I
         snprintf(detailString, sizeof(detailString), "Idle= B  / [C]");
       break;
     case ePwmFreq:
-      snprintf(detailString, sizeof(detailString), "pwmFreq=%d", ds.pwmFreq);
+      snprintf(detailString, sizeof(detailString), "pwmFreq=%d", dp.pwmFreq);
       break;
     case eDIIRWeight:
       snprintf(detailString, sizeof(detailString), "P_IIR: %.2f", pp.dIIRWeight);

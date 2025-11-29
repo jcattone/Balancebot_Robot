@@ -1,21 +1,23 @@
-// ESP-NOW control
+// ESP-NOW control requires WiFi support
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
 
+// Private library
 #include "EspNowRemote.h"
 
+// Application modules
 #include "types.h"
 #include "tuning.h"
 #include "battery_sense.h"
 #include "motor_control.h"
 #include "imu.h"
 
+// Hardware config
 #include "pins.h"
 
-using namespace EspNowRemote;
-RmtBase* remote = EspNowRemote::MakeController();
-
+// Persistent state
+EspNowRemote::RmtBase* remote = EspNowRemote::MakeController();
 BatteryState batteryState{};
 ImuConfig imuConfig{};
 MotorConfig motorConfig{};
@@ -39,6 +41,7 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
+  // Module init
   initBatterySense(&batteryState);
   initMotors(&motorConfig);
   initImu(&imuConfig);

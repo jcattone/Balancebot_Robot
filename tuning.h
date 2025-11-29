@@ -47,12 +47,13 @@ struct DriveParams {
 
   float throttleBias;
   float steeringBias;
+  int pwmFreq;
 };
 
+// Applied/derived state
 struct DriveState {
-  float pwmDutyAccumulator;       // gPwmDutyAccumulator;
-  float pwmDutyAppliedMagnitude;  // gPwmDutyAppliedMagnitude;
-  int pwmFreq;                    // gPwmFreq;
+  float pwmDutyAccumulator;
+  float pwmDutyAppliedMagnitude;
 };
 
 // Originally: pitch 0.3/0/0.05 (IIR .16), vel 0.14/0/0 (IIR .8) w/ intrinsic 60x
