@@ -2,36 +2,31 @@
 #include "EspNowRemote.h"
 #include "EspNowRemote_Events.h"
 #include "types.h"
-//#include "motor_control.h" // caused circular inclusion
-
-// Updated by the callbacks from the remote instance
-extern EspNowRemote::joystick_state_t g_joystick_state;
-extern EspNowRemote::joystick_analog_state_t g_joystick_analog_state;
-extern uint8_t g_last_message_type;
-extern unsigned long last_hid_input_timestamp;
-
 
 // How often do the control functions run?
-constexpr int g_sample_freq = 200;                     // Hz
-constexpr int g_update_freq = 200;                     // Hz
-constexpr int g_sample_period = 1000 / g_sample_freq;  // ms
-constexpr int g_update_period = 1000 / g_update_freq;  // ms
+constexpr int UPDATE_FREQ = 200;                   // Hz
+constexpr int UPDATE_PERIOD = 1000 / UPDATE_FREQ;  // ms
 
 constexpr int PWM_PRECISION = 12;
 constexpr int PWM_MAX = ((1 << PWM_PRECISION) - 1);
 constexpr int PWM_SCALE_FROM_8BIT = (1 << (PWM_PRECISION - 8));
 
-// Tuning parameters
-#ifdef ADAPTIVE_FUSION_KI
-extern float gAccelPeakDecay;
-#endif
-
+struct RemoteInput {
+  EspNowRemote::joystick_state_t joystick_state;
+  EspNowRemote::joystick_analog_state_t joystick_analog_state;
+  uint8_t last_message_type;
+  unsigned long last_hid_input_timestamp;
+  eConfigMode current_config_mode;
+};
 
 struct ImuParams {
   int sampleFreq;
   float kp;
   float ki;
   float kiScale;
+#ifdef ADAPTIVE_FUSION_KI
+  float accelPeakDecay;
+#endif
 };
 
 struct ImuState {
@@ -82,8 +77,6 @@ struct BatteryState {
   float voltagePercent;
 };
 
-// TODO: Split into IMUState, MotorState, and BatteryState, as we may want to swap motor configs without swapping the others?
-// TODO: Collapse (e.g., imuParams -> params)
 struct ImuConfig {
   ImuParams params;
   ImuState state;
@@ -97,6 +90,6 @@ struct MotorConfig {
 };
 
 // Control / interaction methods to be called from Loop()
-void initInput(EspNowRemote::RmtBase* remote);
-void handleInput(MotorConfig* motor, ImuConfig* imu, BatteryState* battery);
-void updateRemoteDisplay(EspNowRemote::RmtBase* remote, MotorConfig* motor, ImuConfig* imu, BatteryState* battery);
+void initInput(EspNowRemote::RmtBase* remote, RemoteInput* remoteInput);
+void handleInput(RemoteInput* remoteInput, MotorConfig* motor, ImuConfig* imu, BatteryState* battery);
+void updateRemoteDisplay(EspNowRemote::RmtBase* remote, RemoteInput* ri, MotorConfig* motor, ImuConfig* imu, BatteryState* battery);

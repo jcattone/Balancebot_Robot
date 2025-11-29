@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 
+// #define ADAPTIVE_FUSION_KI 1
+
 struct OrientationAngles {
   float pitch;
   float roll;

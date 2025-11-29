@@ -4,25 +4,17 @@
 
 using namespace EspNowRemote;
 
-eConfigMode gCurrentConfigMode = eDefaultConfigMode;
+bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len, void* caller_defined_data);
 
-joystick_state_t g_joystick_state = {};
-joystick_analog_state_t g_joystick_analog_state = {};
-uint8_t g_last_message_type = MSGTYPE_UNKNOWN;
-
-unsigned long last_hid_input_timestamp = 0;
-
-#ifdef ADAPTIVE_FUSION_KI
-float gAccelPeakDecay = 0.990f;
-#endif
-
-bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len);
-
-void initInput(EspNowRemote::RmtBase* newRemote) {
+void initInput(EspNowRemote::RmtBase* newRemote, RemoteInput* remoteInput) {
   // To use lambdas as callbacks, we can't use a capture expression.
   // Instead, explicitly capture the remote in the parent scope.
   static EspNowRemote::RmtBase* capturedRemote;
   capturedRemote = newRemote;
+
+  remoteInput->current_config_mode = eDefaultConfigMode;
+  remoteInput->last_message_type = MSGTYPE_UNKNOWN;
+  remoteInput->last_hid_input_timestamp = 0;
 
   // Forward esp wifi events to the remote
   esp_now_register_send_cb([](const esp_now_send_info_t* tx_info, esp_now_send_status_t send_status) {
@@ -33,12 +25,13 @@ void initInput(EspNowRemote::RmtBase* newRemote) {
   });
 
   capturedRemote->Setup();
-  capturedRemote->RegisterMsgHandler(OnControllerMessage);
+  capturedRemote->RegisterMsgHandler(OnControllerMessage, remoteInput);
   capturedRemote->Start();
 }
 
 // When the remote controller wants to raise a message, it will be published here.
-bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len) {
+bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len, void* caller_defined_data) {
+  RemoteInput* remoteInput = (RemoteInput*)caller_defined_data;
   switch (msg_type) {
     case EspNowRemote::MSGTYPE_SELF_STATUS:
       // Loopback status from the local remote instance... not from the controller.
@@ -50,15 +43,15 @@ bool OnControllerMessage(uint8_t msg_type, const uint8_t* data, int data_len) {
       break;
 
     case MSGTYPE_RMT_JOYSTICK:
-      memcpy(&g_joystick_state, data, data_len);
-      g_last_message_type = msg_type;
-      last_hid_input_timestamp = micros();
+      memcpy(&remoteInput->joystick_state, data, data_len);
+      remoteInput->last_message_type = msg_type;
+      remoteInput->last_hid_input_timestamp = micros();
       break;
 
     case MSGTYPE_RMT_JOYSTICK_ANALOG:
-      memcpy(&g_joystick_analog_state, data, data_len);
-      g_last_message_type = msg_type;
-      last_hid_input_timestamp = micros();
+      memcpy(&remoteInput->joystick_analog_state, data, data_len);
+      remoteInput->last_message_type = msg_type;
+      remoteInput->last_hid_input_timestamp = micros();
       break;
   }
   return true;
@@ -70,7 +63,7 @@ void adjustPidK(float* f, float delta) {
     *f = 0.0f;
 }
 #define SCREEN_CHAR_WIDTH 21  // 5+1 pixel font width
-void handleInput(MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
+void handleInput(RemoteInput* ri, MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
   static unsigned long lastUpdate = 0;
   static bool suppressModeChange = false;
   // unsigned int now = millis();
@@ -83,27 +76,34 @@ void handleInput(MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
   auto& pp = motor->pitchPidParams;
   auto& vp = motor->velocityPidParams;
 
+  // local aliases for brevity
+  auto& joystick_state = ri->joystick_state;
+  auto& joystick_analog_state = ri->joystick_analog_state;
+  auto& last_message_type = ri->last_message_type;
+  auto& last_hid_input_timestamp = ri->last_hid_input_timestamp;
+  auto& current_config_mode = ri->current_config_mode;
+
   static unsigned long last_hid_message_processed = 0;
   if (last_hid_message_processed == last_hid_input_timestamp)
     return;
   last_hid_message_processed = last_hid_input_timestamp;
 
   // Process joystick events if there's an unprocessed count.
-  if (g_last_message_type == MSGTYPE_RMT_JOYSTICK_ANALOG) {
+  if (last_message_type == MSGTYPE_RMT_JOYSTICK_ANALOG) {
     // -1.0 .. +1.0
-    dp.steeringBias = g_joystick_analog_state.x_axis;
+    dp.steeringBias = joystick_analog_state.x_axis;
     // Remap to +/- 20 degrees
-    dp.throttleBias = g_joystick_analog_state.y_axis;
-  } else if (g_last_message_type == MSGTYPE_RMT_JOYSTICK && g_joystick_state.count > 0) {
+    dp.throttleBias = joystick_analog_state.y_axis;
+  } else if (last_message_type == MSGTYPE_RMT_JOYSTICK && joystick_state.count > 0) {
     // Extract the joystick state
-    bool up = (g_joystick_state.joystick_direction & JOYSTICK_UP) != 0;
-    bool down = (g_joystick_state.joystick_direction & JOYSTICK_DOWN) != 0;
-    bool left = (g_joystick_state.joystick_direction & JOYSTICK_LEFT) != 0;
-    bool right = (g_joystick_state.joystick_direction & JOYSTICK_RIGHT) != 0;
-    int count = std::max((uint8_t)1, g_joystick_state.count);
+    bool up = (joystick_state.joystick_direction & JOYSTICK_UP) != 0;
+    bool down = (joystick_state.joystick_direction & JOYSTICK_DOWN) != 0;
+    bool left = (joystick_state.joystick_direction & JOYSTICK_LEFT) != 0;
+    bool right = (joystick_state.joystick_direction & JOYSTICK_RIGHT) != 0;
+    int count = std::max((uint8_t)1, joystick_state.count);
 
     // reset (consume) the count, so that events are not reprocessed
-    g_joystick_state.count = 0;
+    joystick_state.count = 0;
 
     // For ergonomics, config mode is single-step (one step per tap).
     // Once changed, wait for the joystick to return to a
@@ -117,20 +117,20 @@ void handleInput(MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
       // Roll the config mode, but then suppress additional mode
       // changes to prevent rapidly scrolling through config options.
       if (up) {
-        if (gCurrentConfigMode == 0)
-          gCurrentConfigMode = (eConfigMode)(eMaxConfigMode);
-        gCurrentConfigMode = (eConfigMode)(gCurrentConfigMode - 1);
+        if (current_config_mode == 0)
+          current_config_mode = (eConfigMode)(eMaxConfigMode);
+        current_config_mode = (eConfigMode)(current_config_mode - 1);
         suppressModeChange = true;
       } else if (down) {
-        gCurrentConfigMode = (eConfigMode)(gCurrentConfigMode + 1);
-        if (gCurrentConfigMode == eMaxConfigMode)
-          gCurrentConfigMode = (eConfigMode)0;
+        current_config_mode = (eConfigMode)(current_config_mode + 1);
+        if (current_config_mode == eMaxConfigMode)
+          current_config_mode = (eConfigMode)0;
         suppressModeChange = true;
       }
     }
 
     // Right/left apply a change to the current mode, scaled by the count when applicable.
-    switch (gCurrentConfigMode) {
+    switch (current_config_mode) {
       case eFusionKp:
         {
           auto& kp = imu->params.kp;
@@ -147,8 +147,8 @@ void handleInput(MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
         }
 #ifdef ADAPTIVE_FUSION_KI
       case eAccelPeakDecay:
-        if (right) gAccelPeakDecay = min(1.0f, gAccelPeakDecay + 0.001f * count);
-        else if (left) gAccelPeakDecay = max(0.0f, gAccelPeakDecay - 0.001f * count);
+        if (right) imu->params.accelPeakDecay = min(1.0f, imu->params.accelPeakDecay + 0.001f * count);
+        else if (left) imu->params.accelPeakDecay = max(0.0f, imu->params.accelPeakDecay - 0.001f * count);
         break;
 #endif
       case ePitchTrim:
@@ -260,7 +260,7 @@ void handleInput(MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
 
           ds.pwmDutyAccumulator = 0.0f;
           ds.pwmDutyAppliedMagnitude = 0.0f;
-          ds.pwmFreq = 2 * g_update_freq;
+          ds.pwmFreq = 2 * UPDATE_FREQ;
 
           pp.kp = 0.0f;
           pp.ki = 0.0f;
@@ -281,7 +281,7 @@ void handleInput(MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
 }
 
 // TODO: Abort immediately if not connected, and always update when reconnected
-void updateRemoteDisplay(RmtBase* remote, MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
+void updateRemoteDisplay(RmtBase* remote, RemoteInput* ri, MotorConfig* motor, ImuConfig* imu, BatteryState* battery) {
   unsigned int now = millis();
   auto& dp = motor->driveParams;
   auto& ds = motor->driveState;
@@ -304,7 +304,7 @@ void updateRemoteDisplay(RmtBase* remote, MotorConfig* motor, ImuConfig* imu, Ba
   lastUpdate = now;
 
   char detailString[SCREEN_CHAR_WIDTH + 1];
-  switch (gCurrentConfigMode) {
+  switch (ri->current_config_mode) {
     case eReset:
       snprintf(detailString, sizeof(detailString), "Reset (hold)");
       break;
@@ -319,7 +319,7 @@ void updateRemoteDisplay(RmtBase* remote, MotorConfig* motor, ImuConfig* imu, Ba
       break;
 #ifdef ADAPTIVE_FUSION_KI
     case eAccelPeakDecay:
-      snprintf(detailString, sizeof(detailString), "KiDecay=*%.1f%%", gAccelPeakDecay * 100.0f);
+      snprintf(detailString, sizeof(detailString), "KiDecay=*%.1f%%", imu->params.accelPeakDecay * 100.0f);
       break;
 #endif
     case ePwmMin:

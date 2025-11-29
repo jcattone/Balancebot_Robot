@@ -3,4 +3,4 @@
 #include "types.h"
 
 void initMotors(MotorConfig* motorConfig);
-void updateMotors(MotorConfig* motorConfig, ImuState* imuState);
+void updateMotors(MotorConfig* motorConfig, ImuConfig* imuConfig);

@@ -46,10 +46,13 @@ void initImu(ImuConfig* imuConfig) {
   //   accel (gravity) data, which is perturbed by linear motion.
   //   A small Ki weight still corrects integration error from the
   //   accel (gravity) vector.
-  params.sampleFreq = g_sample_freq;
+  params.sampleFreq = UPDATE_FREQ;
   params.kp = 3.7f;
   params.ki = 0.3f;
   params.kiScale = 1.0f;
+#ifdef ADAPTIVE_FUSION_KI
+  params.accelPeakDecay = 0.990f;
+#endif
 
   // Param: samples per second
   filter.begin(params.sampleFreq);
@@ -66,7 +69,7 @@ void updateOrientation(ImuConfig* imuConfig) {
   // static unsigned long lastUpdate = 0;
   // unsigned int now = millis();
   // // Target 100 Hz, coordinated with the rate we provided to filter.begin()
-  // if (now - lastUpdate < g_sample_period)
+  // if (now - lastUpdate < UPDATE_PERIOD)
   //   return;
   // lastUpdate = now;
 

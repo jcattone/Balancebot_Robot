@@ -94,7 +94,7 @@ void initMotors(MotorConfig* motorConfig) {
 //     Why isn't the velocity pid countering lingering duty w/ counter-tilt?
 //   * Sometimes, a large change of angle runs away rapidly.  Seems like pitch
 //     pid not responding rapidly enough.  Fusion / IMU issue (Kp/Ki)?
-void updateMotors(MotorConfig* motorConfig, ImuState* imuState) {
+void updateMotors(MotorConfig* motorConfig, ImuConfig* imuConfig) {
   static int startupPwmAttenuation = 0;
   unsigned long nowMs = millis();
   auto& dp = motorConfig->driveParams;
@@ -103,7 +103,7 @@ void updateMotors(MotorConfig* motorConfig, ImuState* imuState) {
   // ----------------------------------------
   // Perform updates every 5ms (200/sec)
   // static unsigned long lastUpdate = 0;
-  // if (nowMs - lastUpdate < g_update_period)
+  // if (nowMs - lastUpdate < UPDATE_PERIOD)
   //   return;
   // lastUpdate = nowMs;
 
@@ -158,7 +158,7 @@ void updateMotors(MotorConfig* motorConfig, ImuState* imuState) {
   // The current pitch will be compared to the desired pitch setpoint to determine
   // what acceleration is necessary to achieve that pitch setpoint.
   float pidAccelOut;  // -255..255 nominal
-  bool pitchPidFault = pitchPidUpdate(imuState->orientation.pitch, desiredPitchOut, deltaTSec, pidAccelOut, dp, ds, motorConfig->pitchPidParams);
+  bool pitchPidFault = pitchPidUpdate(imuConfig->state.orientation.pitch, desiredPitchOut, deltaTSec, pidAccelOut, dp, ds, motorConfig->pitchPidParams);
   // The acceleration is constrained to a reasonable range
   float rawAccel = constrain(pidAccelOut, -255.0f, 255.0f);
   if (emitDiag) {
@@ -183,7 +183,7 @@ void updateMotors(MotorConfig* motorConfig, ImuState* imuState) {
   // TODO: Account for steering's perturbing effects on applied accel (attenuating fwd/back accel,
   // but increasing side-to-side accel).
   static float normalizedAccelMagPeak = 0.0f;
-  normalizedAccelMagPeak = std::max(gAccelPeakDecay * normalizedAccelMagPeak, std::abs(constrainedAccel) / 255.0f);
+  normalizedAccelMagPeak = std::max(imuConfig->params.accelPeakDecay * normalizedAccelMagPeak, std::abs(constrainedAccel) / 255.0f);
   imuConfig->params.kiScale = 1.0f - normalizedAccelMagPeak;
 #endif
 
@@ -329,7 +329,7 @@ void updateMotors(MotorConfig* motorConfig, ImuState* imuState) {
   static unsigned long anyFaultTimeMs = 0;
   static bool anyFault = false;
   bool wasPidFault = anyFault;
-  anyFault = velocityPidFault || pitchPidFault || imuState->fault;
+  anyFault = velocityPidFault || pitchPidFault || imuConfig->state.fault;
   if (anyFault && !wasPidFault) {
     if (velocityPidFault)
       Serial.println("Velocity Fault!");
