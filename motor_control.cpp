@@ -22,13 +22,13 @@ void initMotors(MotorConfig* motorConfig) {
   driveParams->pwmMinDuty = 23;
   // 160 is nominal ((2 * 4.2) - 0.7) * (160 / 255) ~= 5V (2x 18650 - diode drop * pwm ratio = rated TT motor voltage)
   // but a bit more oomph helps recovery
-  driveParams->pwmMaxDuty = 240;
+  driveParams->pwmMaxDuty = 255;
   // The IMU tends to shift, and the CoM isn't quite over the axle, so -2.6..-4.0 seems to be the sweet spot
   driveParams->pitchTrim = -2.8f;
   // The fraction shifted from one motor to the other
   // TODO: Implement PID control for this, driven by encoder input?
   driveParams->yawTrim = 0.0f;
-  driveParams->maxThrottleBias = (160.0f / 255.0f);  // Target roughly 5V max throttle (with headroom for correction)
+  driveParams->maxThrottleBias = (150.0f / 255.0f);  // Target roughly 5V max throttle (with headroom for correction)
   driveParams->motorFilterWeight = 0.908f;
   driveParams->throttleBias = 0.0f;
   driveParams->steeringBias = 0.0f;
@@ -43,7 +43,7 @@ void initMotors(MotorConfig* motorConfig) {
   pitchParams->dIIRWeight = 1.0f;
 
   velocityParams->inputIIRWeight = 0.020;  // Was 0.1.  .01 weights the current speed; the IIR decays to < 2% in one second
-  velocityParams->kp = 6.0f;
+  velocityParams->kp = 8.0f;
   velocityParams->ki = 2.0f;  // Experimental - overcomes carpet 'stuck', but exacerbates over-acceleration
   velocityParams->kd = 0.0f;
   velocityParams->dIIRWeight = 0.50f;
@@ -96,7 +96,8 @@ void initMotors(MotorConfig* motorConfig) {
 //     pid not responding rapidly enough.  Fusion / IMU issue (Kp/Ki)?
 void updateMotors(MotorConfig* motorConfig, ImuConfig* imuConfig) {
   static int startupPwmAttenuation = 0;
-  unsigned long nowMs = millis();
+  unsigned long nowUs = micros();
+  unsigned long nowMs = nowUs / 1000;
   auto& dp = motorConfig->driveParams;
   auto& ds = motorConfig->driveState;
 
@@ -111,10 +112,11 @@ void updateMotors(MotorConfig* motorConfig, ImuConfig* imuConfig) {
   // Inter-sample time scaling
   // Give the PID feedback accurate time estimates
   // Calculate dT in seconds (the actual time unit is arbitrary, as long as we're consistent)
-  static unsigned long lastSampleTimeMs = 0;
+  // Use us instead of ms for precision (intervals are only 5ms, so even 1ms can make a large difference)
+  static unsigned long lastSampleTimeUs = 0;
   static bool isFirstSample = true;
-  float deltaTSec = static_cast<float>(nowMs - lastSampleTimeMs) / 1000.0f;
-  lastSampleTimeMs = nowMs;
+  float deltaTSec = static_cast<float>(nowUs - lastSampleTimeUs) / 1000000.0f;
+  lastSampleTimeUs = nowUs;
 
   // The first sample is used only to set the sample time, so that
   // the next sample (the first real one) can be evaluated with an

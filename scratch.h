@@ -6,7 +6,6 @@
 // TODO: Floor-proximity and collision sensors
 // TODO: Third-tier w/ additional sensors?
 // TODO: Clean up wiring
-// TODO: Easier onboard vs. usb power switching
 // TODO: Settings persistence
 // TODO: Allow a small anti-stiction reservoir (reset when the motor is turned off) to briefly (and mildly) boost the power when transitioning out of a full-stop
 // TODO: Sometimes locks up after a fall (motor stuck running, no further variation or remote response)
@@ -17,7 +16,7 @@
 //       Maybe other params are adaptive as well?
 // TODO: Auto-tune pitch trim - observe average power when gThrottleBias == 0, slowly adjust pitchTrim to bring the averaged pwmDutyAccumulator closer to 0
 // TODO: Battery gauge: investigate BatterySense library, only sample when the motor is off, or at least not accelerating to a greater magnitude?
-// TODO: Set a battery fault if the voltage falls below a critical level
+// TODO: Set a battery fault (and display an error on the remote) if the voltage falls below a critical level
 // TODO: Use voltage sense to dynamically adjust the pwm range (at the least, the max), but use an IIR or when-motor-off sampling to avoid oscillation from motor draw
 
 // Alt: pwmFreq: 400, Kp 6.9/0.3, p0.86/0/0.3, P_IIR 0.5, v8.0,0,0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,

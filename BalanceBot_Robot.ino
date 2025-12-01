@@ -20,6 +20,7 @@
 EspNowRemote::RmtBase* remote = EspNowRemote::MakeController();
 BatteryState batteryState{};
 ImuConfig imuConfig{};
+// TODO: Multiple motor configs / manual or auto selection based on goal. A/B test w/ persist/reset?
 MotorConfig motorConfig{};
 RemoteInput remoteInput{};
 

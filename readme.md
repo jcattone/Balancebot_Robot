@@ -12,3 +12,5 @@ Devices
   10k pull-up resistors on both I2C lines
   1000uF cap on motor power
   0.1uF bypass cap on each motor power
+
+  
