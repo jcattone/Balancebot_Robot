@@ -433,6 +433,13 @@ bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, flo
   // PID per-update inputs
   // pitchTrim shifts the reported angle to a 'true' angle.
   // [-90, -90] generally speaking (pitch decreases after 90 for some reason?)
+  // TODO: adaptive pitchTrim (e.g., mutate the trim to bring unsteered/unthrottled corrective efforts approximately neutral in sign & magnitude?)
+  //   * The goal would be to allow rapid correction for things like an attached arm being extended, changing the effective CoM.
+  //   * Alternatively, we could attempt to model the kinematics?
+  //   * Or keep track of pitch vs. accel neutral points, and detect deviation?
+  //   * When idle, automatically adapt trim to maintain position (integration motor impulse?)
+  //   * Encoder for tracking actual wheel position (note: need to account for pitch, maybe just allow a small window of positional dead zone) 
+  //   * Use a mouse or other optical flow sensor to read ground distance (again, noting that pitch will change the field of view, angle, and focus)
   float currentAngle = currentPitch - dp.pitchTrim;
 
   // --------------------------------------

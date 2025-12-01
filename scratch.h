@@ -18,6 +18,33 @@
 // TODO: Battery gauge: investigate BatterySense library, only sample when the motor is off, or at least not accelerating to a greater magnitude?
 // TODO: Set a battery fault (and display an error on the remote) if the voltage falls below a critical level
 // TODO: Use voltage sense to dynamically adjust the pwm range (at the least, the max), but use an IIR or when-motor-off sampling to avoid oscillation from motor draw
+// TODO: Ardupilot is an actively supported autonomous firmware and platform.
+
+Possible hardware sources:
+B5R2 Electronics Surplus: 
+  This is a premier electronic retailer specializing in a wide array of surplus electronics and components, 
+  a popular destination for tech enthusiasts and DIYers.
+  Address: 9970 SE Stanley Ave, Portland, OR 97222
+STUFF, Your High Tech Junk Store: 
+  Known for a large variety of "stuff" including computers, video games, gaming systems, and other electronics
+  at reasonable prices.
+  Address: 9770 SE 82nd Ave, Happy Valley, OR 97086
+SurplusGizmos: 
+  Located in nearby Hillsboro, this store is a well-regarded place for finding electronic components and equipment.
+  Address: 5797 NW Cornelius Pass Rd, Hillsboro, OR 97124
+Free Geek: 
+  A non-profit that recycles and resells refurbished electronics. Their store is currently online only,
+  but it's a great source for functional refurbished items.
+  Website: Free Geek (check their website for current online store details)
+URS Electronics: 
+  A local business known for electronic parts and good customer service.
+  Address: 123 NE 7th Ave, Portland, OR 97232
+Eagle Bargain Outlet / Bin Stores: 
+  These locations often sell a mix of general merchandise, including a lot of electronics that are customer returns or
+  overstock from major retailers like Costco or Amazon. You can find locations by searching for "bin stores" or 
+  "liquidation stores" in the Portland area on services like Yelp.
+General Thrift/Vintage Stores: 
+  Places like Really Good Stuff and Hollywood Vintage may occasionally have older or unique electronics mixed in their inventory. 
 
 // Alt: pwmFreq: 400, Kp 6.9/0.3, p0.86/0/0.3, P_IIR 0.5, v8.0,0,0, V_IIR 0.5, SP_IIR 0.010, Throttle 100%, mSmooth 0.908,
 //   Weak balance, somewhat jittery
