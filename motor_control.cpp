@@ -439,7 +439,7 @@ bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, flo
   //   * Or keep track of pitch vs. accel neutral points, and detect deviation?
   //   * When idle, automatically adapt trim to maintain position (integration motor impulse?)
   //   * Encoder for tracking actual wheel position (note: need to account for pitch, maybe just allow a small window of positional dead zone) 
-  //   * Use a mouse or other optical flow sensor to read ground distance (again, noting that pitch will change the field of view, angle, and focus)
+  //   * Use a mouse or other optical flow sensor (e.g., PMW3901, but that has long minimum range) to read ground distance (again, noting that pitch will change the field of view, angle, and focus)
   float currentAngle = currentPitch - dp.pitchTrim;
 
   // --------------------------------------

@@ -24,6 +24,10 @@ ImuConfig imuConfig{};
 MotorConfig motorConfig{};
 RemoteInput remoteInput{};
 
+// TODO: ToF or ultasonic sensors facing front/back - poll one based upon motor direction. Avoid false signal from ground when pitched down?
+// TODO: Tire guards / feeler switches, to avoid direct non-ground wheel contact?
+// TODO: Retune for third tier
+
 void setup() {
   Serial.begin(115200);
 
