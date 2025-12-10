@@ -1,15 +1,20 @@
 #include "motor_control.h"
+#include "AS5600.h"
 
 #include "types.h"
 #include "tuning.h"
 #include "pins.h"
 
 using namespace EspNowRemote;
+AS5600 as5600;
 
 bool pitchPidUpdate(float currentPitch, float desiredAngle, float deltaTSec, float& accelOut, DriveParams& dp, DriveState& ds, PitchPIDParams& pp);
 bool velocityPidUpdate(float desiredSpeedNormalized, float deltaTSec, float& pitchTarget, DriveParams& dp, DriveState& ds, VelocityPIDParams& vp);
 
 void initMotors(MotorConfig* motorConfig) {
+  as5600.begin();
+  delay(10);
+
   DriveParams* driveParams = &motorConfig->driveParams;
   DriveState* driveState = &motorConfig->driveState;
   PitchPIDParams* pitchParams = &motorConfig->pitchPidParams;
@@ -36,6 +41,8 @@ void initMotors(MotorConfig* motorConfig) {
 
   driveState->pwmDutyAccumulator = 0.0f;       // The raw PWM target
   driveState->pwmDutyAppliedMagnitude = 0.0f;  // pwmDutyAccumulator, but scaled to exclude the dead zone and map into the min/max PWM range
+  driveState->m1AngleU16 = as5600.readAngle();
+  driveState->m1StationKeepingError = 0;
 
   pitchParams->kp = 0.46f;
   pitchParams->ki = 0.0f;
@@ -126,6 +133,21 @@ void updateMotors(MotorConfig* motorConfig, ImuConfig* imuConfig) {
     return;
   }
 
+  // Calculate the angle delta since the last update
+  int m1AngleNew = as5600.readAngle();
+  int m1AngleDelta = m1AngleNew - ds.m1AngleU16;
+  ds.m1AngleU16 = m1AngleNew;
+
+  // Adjust for wraparound (the angle reads as 0-4095),
+  // knowing that we're reading far faster than it would
+  // take for half a rotation.
+  if(m1AngleDelta < -2048)
+    m1AngleDelta += 4096;
+  else if(m1AngleDelta > 2048)
+    m1AngleDelta -= 4096;
+
+  // TODO: drive station keeping through a PID?
+
   // ---------------------------------------
   // Diagnostics output trigger (currently disabled)
   static unsigned long lastDiag = 0;
@@ -143,12 +165,26 @@ void updateMotors(MotorConfig* motorConfig, ImuConfig* imuConfig) {
   // Either PID implementation can indicate a fault to stop the motors after a
   // very short debouncing period.
 
+  // Only accumulate position error when the throttle is actively applied (with a deadzone, given that we're accepting analog input)
+  // TODO: tuning: stationKeepingThrottleDeadBand = 0.15f
+  if(abs(dp.throttleBias) > 0.15f || abs(dp.steeringBias) > 0.15f)
+    ds.m1StationKeepingError = 0;
+  else
+    ds.m1StationKeepingError += m1AngleDelta;
+  
+  // The station keeping throttle is currently just a simple proportional feedback.
+  // It will scale up to full-throttle only after four full wheel rotations of error,
+  // and the low-error throttle input is not prone to oscillation.
+  // TODO: tuning: stationKeepingKp
+  auto stationKeepingThrottleBias = constrain((float) ds.m1StationKeepingError / (4.0f * 4096.0f), -1.0f, 1.0f);
+
   // The desired speed is calculated as a normalized (relative) fraction of
   // the configured maximum duty cycle, e.g., [-1.0, 1.0], but is scaled down
   // to leave headroom for balance correction via further acceleration.
-  float desiredSpeedNormalized = min(abs(dp.throttleBias), dp.maxThrottleBias);  // dp.throttleBias (unit), dp.maxThrottleBias (1.0)
-  if (dp.throttleBias < 0)
-    desiredSpeedNormalized *= -1.0;
+  // If there was accumulated position error, the position correction is
+  // applied as an additional throttle input.
+  float netThrottle = dp.throttleBias + stationKeepingThrottleBias;
+  float desiredSpeedNormalized = constrain(netThrottle, -dp.maxThrottleBias, dp.maxThrottleBias);
 
   float desiredPitchOut = 0.0f;
   bool velocityPidFault = velocityPidUpdate(desiredSpeedNormalized, deltaTSec, desiredPitchOut, dp, ds, motorConfig->velocityPidParams);
@@ -358,6 +394,8 @@ void updateMotors(MotorConfig* motorConfig, ImuConfig* imuConfig) {
     startupPwmAttenuation = 0;
     dp.throttleBias = 0.0f;
     dp.steeringBias = 0.0f;
+    ds.m1StationKeepingError = 0.0f;
+    ds.m1AngleU16 = as5600.readAngle();
     unscaledPwmMagnitudeA = unscaledPwmMagnitudeB = 0.0f;
   } else if (!anyFault && faultLedState) {
     digitalWrite(LED_PIN, LOW);

@@ -54,6 +54,8 @@ struct DriveParams {
 struct DriveState {
   float pwmDutyAccumulator;
   float pwmDutyAppliedMagnitude;
+  int m1AngleU16;
+  int m1StationKeepingError;
 };
 
 // Originally: pitch 0.3/0/0.05 (IIR .16), vel 0.14/0/0 (IIR .8) w/ intrinsic 60x

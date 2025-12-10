@@ -2,6 +2,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
+#include <Wire.h>
 
 // Private library
 #include "EspNowRemote.h"
@@ -51,6 +52,8 @@ void setup() {
   initMotors(&motorConfig);
   initImu(&imuConfig);
   initInput(remote, &remoteInput);
+
+  Wire.setClock(400000);
 }
 
 void loop() {

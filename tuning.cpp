@@ -392,7 +392,7 @@ void updateRemoteDisplay(RmtBase* remote, RemoteInput* ri, MotorConfig* motor, I
   static unsigned long last_title_sent_millis = 0L;
   char titleString[SCREEN_CHAR_WIDTH] = { 0 };
   static char lastTitleBuf[SCREEN_CHAR_WIDTH + 1] = {};
-  snprintf(titleString, sizeof(titleString), "Pit=%+04.1f PWM=%.1f", imu->state.orientation.pitch, ds.pwmDutyAccumulator);  // lastFrameRate
+  snprintf(titleString, sizeof(titleString), "P%+.1f D%.1f W%.1f", imu->state.orientation.pitch, ds.pwmDutyAccumulator, 360.0f * ds.m1AngleU16 / 4095.0f);  // lastFrameRate
   if (strcmp(titleString, lastTitleBuf) || now - last_title_sent_millis > 1000) {
     remote->Send(MSGTYPE_CTL_TITLE, reinterpret_cast<const uint8_t*>(titleString), SEND_NULLTERMINATED);
     strcpy(lastTitleBuf, titleString);

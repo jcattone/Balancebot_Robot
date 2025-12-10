@@ -1,6 +1,14 @@
 #if false
 
-  
+// NOTE: AS5600 (magnetic angle encoder): at default I2C speed, a double-read is 1.28ms for an update (angle + raw). With Wire.setClock(400000), that drops to 0.58ms.  With only one read, 0.29ms.
+// NOTE: Similarly, the robot was taking ~2.3ms / update cycle, but 400k I2C dropped that to 1.08. 500k also worked, maybe? < 0.9ms, but fault go stuck - maybe due to an unrelated bug, but maybe due to unstable I2C bus.
+// TODO: Detect I2C bus failure on MPU?
+// NOTE: AS5600: pull the DIR pin one way or the other - don't let it float
+// NOTE: AS5600: fast filter mode can dramatically reduce latency at the expense of soem accuracy/noise
+// NOTE: Need to explore I2C multiplexer, or use a second I2C bus.
+// https://community.simplefoc.com/t/cannot-get-system-over-100rad-s-with-as5600-sensor/4290/13
+// TODO: Are there are additional updates that can be performed less frequently?
+
 // TODO: Motor gain/trim (i.e., adjust for differences in left/right speed or stiction-break)
 // TODO: Wheel encoders for feedback / auto-calibrate trim
 // TODO: Floor-proximity and collision sensors
